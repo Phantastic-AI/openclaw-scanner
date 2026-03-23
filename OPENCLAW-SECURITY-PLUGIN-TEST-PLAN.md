@@ -2,11 +2,11 @@
 
 Last updated: 2026-03-17
 
-Canonical markdown: [OPENCLAW-SECURITY-PLUGIN-TEST-PLAN.md](/home/debian/clawd/home/Workspace/moltpod/security/openclaw-security-plugin/OPENCLAW-SECURITY-PLUGIN-TEST-PLAN.md)
+Canonical markdown for the public scanner repo: [OPENCLAW-SECURITY-PLUGIN-TEST-PLAN.md](./OPENCLAW-SECURITY-PLUGIN-TEST-PLAN.md)
 
 ## Scope
 
-This plan covers the minimal spine in [OPENCLAW-SECURITY-PLUGIN-SPEC.md](/home/debian/clawd/home/Workspace/moltpod/security/openclaw-security-plugin/OPENCLAW-SECURITY-PLUGIN-SPEC.md).
+This plan covers the minimal spine in [OPENCLAW-SECURITY-PLUGIN-SPEC.md](./OPENCLAW-SECURITY-PLUGIN-SPEC.md).
 
 The point of this plan is not to test every idea. It is to prove the small core actually holds under pressure.
 
