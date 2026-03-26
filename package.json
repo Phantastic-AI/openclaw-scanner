@@ -1,10 +1,11 @@
 {
   "name": "openclaw-scanner",
-  "version": "0.6.4",
+  "version": "0.7.0",
   "description": "OpenClaw Scanner — ingress review and egress blocking plugin for OpenClaw agents.",
   "type": "module",
   "main": "index.mjs",
   "bin": {
+    "openclaw-action-reviewd": "bin/openclaw-action-reviewd.mjs",
     "openclaw-scand": "bin/openclaw-scand.mjs"
   },
   "exports": {

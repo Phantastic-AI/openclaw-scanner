@@ -38,6 +38,10 @@ check('type is "module"', pkg.type === 'module');
 check('license is MIT', pkg.license === 'MIT');
 check('has repository url', !!pkg.repository?.url);
 check('has files array', Array.isArray(pkg.files) && pkg.files.length > 0);
+check(
+  'bin.openclaw-action-reviewd points to bin/openclaw-action-reviewd.mjs',
+  pkg.bin?.['openclaw-action-reviewd'] === 'bin/openclaw-action-reviewd.mjs',
+);
 check('bin.openclaw-scand points to bin/openclaw-scand.mjs', pkg.bin?.['openclaw-scand'] === 'bin/openclaw-scand.mjs');
 check(
   'openclaw.extensions includes "./index.mjs"',
@@ -50,10 +54,17 @@ const requiredFiles = [
   'openclaw.plugin.json',
   'README.md',
   'LICENSE',
+  'bin/openclaw-action-reviewd.mjs',
   'bin/openclaw-scand.mjs',
+  'lib/action-reviewd.mjs',
+  'lib/action-reviewd-classifier.mjs',
+  'lib/action-reviewd-server.mjs',
+  'lib/action-reviewd-state.mjs',
   'lib/policy.mjs',
   'lib/cache.mjs',
   'lib/gateway-model.mjs',
+  'lib/mattermost-client.mjs',
+  'lib/openclaw-action-reviewd-service.mjs',
   'lib/text.mjs',
   'lib/antivirus.mjs',
   'lib/scan-daemon.mjs',

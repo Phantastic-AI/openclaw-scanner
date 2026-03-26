@@ -49,6 +49,14 @@ import {
   sanitizeCallerId,
 } from "./lib/text.mjs";
 import {
+  actionReviewdEnabled,
+  actionReviewdRequired,
+  buildActionReviewdRequest,
+  buildRequiredActionReviewdBlockReason,
+  normalizeActionReviewdConfig,
+  requestActionReviewd,
+} from "./lib/action-reviewd.mjs";
+import {
   buildRequiredScanDaemonBlockReason,
   buildScanDaemonRequest,
   getScanDaemonStatus,
@@ -216,6 +224,7 @@ function normalizeConfig(rawConfig, fullConfig) {
     antivirus: normalizeAntivirusConfig(raw),
     sca: normalizeScaConfig(raw),
     scanBroker: normalizeScanDaemonConfig(raw),
+    actionReview: normalizeActionReviewdConfig(raw),
     execPosture: evaluateExecPosture(fullConfig),
   };
 }
@@ -429,6 +438,64 @@ function applyBlockedExecutionReply(message, replyRequirement) {
   return setMessageLeadingText(message, text);
 }
 
+function buildBlockedExecutionPrependContext(replyRequirement) {
+  const text = String(replyRequirement?.message || "").trim();
+  if (!text) {
+    return "";
+  }
+  return [
+    "The immediately previous tool call was blocked before execution by OpenClaw Scanner.",
+    "Do not claim the tool ran. Do not guess outputs, side effects, or installed package names.",
+    "Reply with the exact text below and nothing else.",
+    text,
+  ].join("\n");
+}
+
+function buildPendingActionReviewReply(request) {
+  return [
+    `${REVIEW_LEDGER_PLUGIN_NAME} held one action for out-of-band review before execution.`,
+    "The action has not run.",
+    "A reviewer must approve or deny the exact pending action in the configured action-review channel before it can be retried.",
+    "The reviewer sees the full action details there.",
+    "Replying in this chat will not approve it.",
+  ].join(" ");
+}
+
+function buildDeniedActionReviewReply(request) {
+  const summary = String(request?.actionSummary || "this action").trim();
+  const reason = String(request?.reason || "A reviewer denied the pending action.").trim();
+  return [
+    `${REVIEW_LEDGER_PLUGIN_NAME} will not run one pending action because an out-of-band reviewer denied it.`,
+    `Denied action: ${summary}.`,
+    `${reason}`,
+    "The action has not run. Request a fresh review if you want to try again later.",
+  ].join(" ");
+}
+
+function applyPendingActionReviewReply(message, replyRequirement) {
+  if (!isUserFacingAssistantMessage(message)) {
+    return message;
+  }
+  const text = String(replyRequirement?.message || "").trim();
+  if (!text) {
+    return message;
+  }
+  return setMessageLeadingText(message, text);
+}
+
+function buildPendingActionReviewPrependContext(replyRequirement) {
+  const text = String(replyRequirement?.message || "").trim();
+  if (!text) {
+    return "";
+  }
+  return [
+    "The immediately previous tool call was held for out-of-band action review before execution.",
+    "Do not claim the tool ran. Do not invent approval commands, hashes, or alternate approval flows.",
+    "Reply with the exact text below and nothing else.",
+    text,
+  ].join("\n");
+}
+
 function buildWarnedToolResultMessage(entry, review) {
   const wrappedText =
     "[BEGIN UNTRUSTED TOOL CONTENT]\n" +
@@ -487,6 +554,39 @@ function buildQuarantinedToolResultMessage(message, toolName, review) {
       reasonCode: review?.reasonCode || "quarantined_untrusted_content",
     },
   );
+}
+
+function hasLaterConversationTurn(messages, index) {
+  if (!Array.isArray(messages) || !Number.isInteger(index)) {
+    return false;
+  }
+  for (let cursor = index + 1; cursor < messages.length; cursor += 1) {
+    const role = messages[cursor]?.role;
+    if (role === "user" || role === "assistant") {
+      return true;
+    }
+  }
+  return false;
+}
+
+function flattenHistoricalToolResultMessage(message) {
+  if (!message || typeof message !== "object") {
+    return message;
+  }
+  const flattened = {
+    ...message,
+    role: "user",
+  };
+  delete flattened.toolCallId;
+  delete flattened.toolUseId;
+  delete flattened.toolName;
+  delete flattened.isError;
+  delete flattened.details;
+  return withSecurityMetadata(flattened, {
+    ...getSecurityMetadata(message),
+    historicalFlattened: true,
+    originalRole: "toolResult",
+  });
 }
 
 function buildPrependContext({ warnedTools, quarantinedTools }) {
@@ -937,6 +1037,24 @@ function listLike(entries) {
   return Array.isArray(entries) ? entries : [];
 }
 
+function toGatewayWebSocketUrl(baseUrl) {
+  const normalized = String(baseUrl || "").trim();
+  if (!normalized) {
+    return undefined;
+  }
+  try {
+    const url = new URL(normalized);
+    if (url.protocol === "http:") {
+      url.protocol = "ws:";
+    } else if (url.protocol === "https:") {
+      url.protocol = "wss:";
+    }
+    return url.toString();
+  } catch {
+    return undefined;
+  }
+}
+
 function buildApprovalRequiredBlockReason(toolName, evaluation, argsHash, review, approval) {
   const reasonCode = review?.reasonCode || evaluation.reasonCode || "approval_required";
   const reason = review?.reason || "high-impact action requires explicit human approval";
@@ -945,6 +1063,26 @@ function buildApprovalRequiredBlockReason(toolName, evaluation, argsHash, review
     `${REVIEW_LEDGER_PLUGIN_NAME} needs the user's approval before running ${toolName || "this tool call"}. ` +
     `Action: ${summary}. capability=${evaluation.capability || "unknown"} reason_code=${reasonCode}. ${reason}`
   );
+}
+
+function buildActionReviewRequiredBlockReason(toolName, evaluation, review, request) {
+  return buildPendingActionReviewReply(request);
+}
+
+function buildActionReviewDeniedBlockReason(toolName, request) {
+  return buildDeniedActionReviewReply(request);
+}
+
+function buildActionReviewNoteContext(sessionKey, notes = []) {
+  return {
+    prependContext: notes
+      .map((note) => String(note?.message || "").trim())
+      .filter(Boolean)
+      .join("\n\n"),
+    grantedApprovals: [],
+    deniedApprovals: [],
+    sessionKey,
+  };
 }
 
 function buildReviewFailureBlockReason(toolName, evaluation, argsHash, error) {
@@ -1083,6 +1221,7 @@ const plugin = {
     const antivirusWarningsByToolCall = new Map();
     const antivirusReplyRequirementsBySession = new Map();
     const blockedExecutionRepliesBySession = new Map();
+    const pendingActionReviewRepliesBySession = new Map();
     const scaWarningsByToolCall = new Map();
 
     function rememberPending(entry) {
@@ -1107,6 +1246,7 @@ const plugin = {
       internalReviewSessions.delete(sessionKey);
       antivirusReplyRequirementsBySession.delete(sessionKey);
       blockedExecutionRepliesBySession.delete(sessionKey);
+      pendingActionReviewRepliesBySession.delete(sessionKey);
       const approvalIds = approvalsBySession.get(sessionKey);
       if (approvalIds) {
         for (const approvalId of approvalIds) {
@@ -1405,6 +1545,31 @@ const plugin = {
       blockedExecutionRepliesBySession.delete(sessionKey);
     }
 
+    function rememberPendingActionReviewReply(sessionKey, request) {
+      if (!sessionKey || !request) {
+        return;
+      }
+      pendingActionReviewRepliesBySession.set(sessionKey, {
+        message: buildPendingActionReviewReply(request),
+        requestId: String(request?.requestId || "").trim(),
+        recordedAt: Date.now(),
+      });
+    }
+
+    function getPendingActionReviewReply(sessionKey) {
+      if (!sessionKey) {
+        return undefined;
+      }
+      return pendingActionReviewRepliesBySession.get(sessionKey);
+    }
+
+    function clearPendingActionReviewReply(sessionKey) {
+      if (!sessionKey) {
+        return;
+      }
+      pendingActionReviewRepliesBySession.delete(sessionKey);
+    }
+
     async function persistAntivirusStatus(status) {
       await antivirusStatusStore.set("current", {
         ...status,
@@ -1583,6 +1748,195 @@ const plugin = {
         return `${REVIEW_LEDGER_PLUGIN_NAME} blocked this package-install action because OSV-Scanner is required but unavailable.`;
       }
       return undefined;
+    }
+
+    async function requestExternalActionReview(payload) {
+      return await requestActionReviewd(
+        config.actionReview,
+        buildActionReviewdRequest(payload.op, payload),
+      );
+    }
+
+    async function consumeActionReviewNotes(sessionKey) {
+      const normalizedSessionKey = String(sessionKey || "").trim();
+      if (!normalizedSessionKey || !actionReviewdEnabled(config.actionReview)) {
+        return buildApprovalContextResult(normalizedSessionKey, [], []);
+      }
+      try {
+        const response = await requestExternalActionReview({
+          op: "consume_session_notes",
+          sessionKey: normalizedSessionKey,
+        });
+        return buildActionReviewNoteContext(normalizedSessionKey, response.notes || []);
+      } catch (error) {
+        if (actionReviewdRequired(config.actionReview)) {
+          api.logger.warn(
+            `[${LOG_PREFIX}] action reviewd note fetch failed for ${normalizedSessionKey}: ${String(error)}`,
+          );
+          return buildApprovalContextResult(normalizedSessionKey, [], []);
+        }
+        throw error;
+      }
+    }
+
+    async function submitExternalActionReview({
+      sessionKey,
+      toolName,
+      argsHash,
+      capability,
+      actionSummary,
+      reasonCode,
+      reason,
+      source,
+      gateway,
+    }) {
+      return await requestExternalActionReview({
+        op: "submit_request",
+        sessionKey,
+        toolName,
+        argsHash,
+        capability,
+        actionSummary,
+        reasonCode,
+        reason,
+        source,
+        gateway,
+      });
+    }
+
+    async function consumeExternalActionApproval({ sessionKey, toolName, argsHash }) {
+      return await requestExternalActionReview({
+        op: "consume_approval",
+        sessionKey,
+        toolName,
+        argsHash,
+        actor: "plugin:openclaw-scanner",
+      });
+    }
+
+    async function handleExternalActionReviewAsk({
+      event,
+      ctx,
+      evaluation,
+      argsHash,
+      trustDecision,
+      antivirusAction,
+      reasonCode,
+      reason,
+      source,
+    }) {
+      if (!actionReviewdEnabled(config.actionReview)) {
+        return { handled: false };
+      }
+
+      try {
+        const response = await submitExternalActionReview({
+          sessionKey: ctx.sessionKey || "",
+          toolName: event.toolName,
+          argsHash,
+          capability: evaluation.capability,
+          actionSummary: buildActionSummary(event.toolName, evaluation, event.params),
+          reasonCode,
+          reason,
+          source,
+          gateway: {
+            url: toGatewayWebSocketUrl(config.gatewayBaseUrl),
+            token: config.gatewayToken,
+            timeoutMs: config.actionReview?.timeoutMs,
+          },
+        });
+
+        if (response.status === "approved") {
+          clearPendingActionReviewReply(ctx.sessionKey || "");
+          const consumed = await consumeExternalActionApproval({
+            sessionKey: ctx.sessionKey || "",
+            toolName: event.toolName,
+            argsHash,
+          });
+          if (consumed?.status === "approved") {
+            rememberAntivirusPlan(event.toolCallId, ctx.sessionKey || "", antivirusAction);
+            logSecurity(api, "egress_allow_action_reviewd", {
+              toolName: event.toolName,
+              toolCallId: event.toolCallId || null,
+              capability: evaluation.capability,
+              reasonCode,
+              argsHash,
+              trustClass: trustDecision.trustClass,
+              approvalId: consumed?.approval?.approvalId || response?.approval?.approvalId || null,
+            });
+            return {
+              handled: true,
+              result: undefined,
+            };
+          }
+        }
+
+        if (response.status === "denied") {
+          clearPendingActionReviewReply(ctx.sessionKey || "");
+          logSecurity(api, "egress_denied_by_action_reviewd", {
+            toolName: event.toolName,
+            toolCallId: event.toolCallId || null,
+            capability: evaluation.capability,
+            reasonCode,
+            argsHash,
+            trustClass: trustDecision.trustClass,
+            requestId: response?.request?.requestId || null,
+          });
+          return {
+            handled: true,
+            result: {
+              block: true,
+              blockReason: buildActionReviewDeniedBlockReason(event.toolName, response.request),
+            },
+          };
+        }
+
+        logSecurity(api, "egress_ask_action_reviewd", {
+          toolName: event.toolName,
+          toolCallId: event.toolCallId || null,
+          capability: evaluation.capability,
+          reasonCode,
+          argsHash,
+          trustClass: trustDecision.trustClass,
+          requestId: response?.request?.requestId || null,
+        });
+        rememberPendingActionReviewReply(ctx.sessionKey || "", response?.request);
+        return {
+          handled: true,
+          result: {
+            block: true,
+            blockReason: buildActionReviewRequiredBlockReason(
+              event.toolName,
+              evaluation,
+              { reasonCode, reason },
+              response.request,
+            ),
+          },
+        };
+      } catch (error) {
+        if (actionReviewdRequired(config.actionReview)) {
+          const blockReason = buildRequiredActionReviewdBlockReason();
+          rememberBlockedExecutionReply(ctx.sessionKey || "", blockReason);
+          logSecurity(api, "action_reviewd_required_block", {
+            toolName: event.toolName,
+            toolCallId: event.toolCallId || null,
+            capability: evaluation.capability,
+            argsHash,
+            error: String(error),
+          });
+          return {
+            handled: true,
+            result: {
+              block: true,
+              blockReason: buildBlockedExecutionReply(blockReason),
+            },
+          };
+        }
+        api.logger.warn(
+          `[${LOG_PREFIX}] action reviewd ask fallback for ${event.toolName}: ${String(error)}`,
+        );
+        return { handled: false };
+      }
     }
 
     async function handleScaResult({ event, ctx, action }) {
@@ -2970,8 +3324,12 @@ const plugin = {
       });
       const scaAction = shouldRunScaForAction(antivirusAction) ? antivirusAction : undefined;
       const argsHash = buildArgsHash(event.params);
-      let deniedApproval = findSessionApproval(sessionKey, event.toolName, argsHash, ["denied"]);
-      let grantedApproval = findSessionApproval(sessionKey, event.toolName, argsHash, ["granted"]);
+      let deniedApproval = actionReviewdEnabled(config.actionReview)
+        ? undefined
+        : findSessionApproval(sessionKey, event.toolName, argsHash, ["denied"]);
+      let grantedApproval = actionReviewdEnabled(config.actionReview)
+        ? undefined
+        : findSessionApproval(sessionKey, event.toolName, argsHash, ["granted"]);
 
       if (evaluation.capability === "shell_exec") {
         const posture = await degradeExecPosture({
@@ -3006,7 +3364,7 @@ const plugin = {
           });
           return {
             block: true,
-            blockReason: requiredBrokerBlockReason,
+            blockReason: buildBlockedExecutionReply(requiredBrokerBlockReason),
           };
         }
         if (requiredScaBlockReason) {
@@ -3018,7 +3376,7 @@ const plugin = {
           });
           return {
             block: true,
-            blockReason: requiredScaBlockReason,
+            blockReason: buildBlockedExecutionReply(requiredScaBlockReason),
           };
         }
         rememberAntivirusPlan(event.toolCallId, sessionKey, antivirusAction);
@@ -3057,7 +3415,7 @@ const plugin = {
         });
         return {
           block: true,
-          blockReason: requiredBrokerBlockReason,
+          blockReason: buildBlockedExecutionReply(requiredBrokerBlockReason),
         };
       }
 
@@ -3070,7 +3428,7 @@ const plugin = {
         });
         return {
           block: true,
-          blockReason: requiredScaBlockReason,
+          blockReason: buildBlockedExecutionReply(requiredScaBlockReason),
         };
       }
 
@@ -3091,6 +3449,21 @@ const plugin = {
       }
 
       if (evaluation.finalAction === "ask") {
+        const externalAsk = await handleExternalActionReviewAsk({
+          event,
+          ctx,
+          evaluation,
+          argsHash,
+          trustDecision,
+          antivirusAction,
+          reasonCode: evaluation.reasonCode,
+          reason: "High-impact action requires explicit human approval.",
+          source: "deterministic_ask",
+        });
+        if (externalAsk.handled) {
+          return externalAsk.result;
+        }
+
         const pendingApproval = findSessionApproval(sessionKey, event.toolName, argsHash, ["pending"]);
         if (pendingApproval && !grantedApproval && !deniedApproval) {
           const persistedMessages = await loadLatestSessionApprovalMessages(
@@ -3203,6 +3576,20 @@ const plugin = {
             return;
           }
           if (review.finalAction === "ask") {
+            const externalAsk = await handleExternalActionReviewAsk({
+              event,
+              ctx,
+              evaluation,
+              argsHash,
+              trustDecision,
+              antivirusAction,
+              reasonCode: review.reasonCode,
+              reason: review.reason || "High-impact action requires explicit human approval.",
+              source: "gateway_ask",
+            });
+            if (externalAsk.handled) {
+              return externalAsk.result;
+            }
             const approval = await ensureApprovalEntry({
               sessionKey,
               toolName: event.toolName,
@@ -3403,7 +3790,42 @@ const plugin = {
       if (isInternalReviewSessionKey(ctx.sessionKey) || getInternalReviewSession(ctx.sessionKey)) {
         return;
       }
-      const approvalContext = await reconcileApprovalIntent(event, ctx);
+      const blockedExecutionContext = buildBlockedExecutionPrependContext(
+        getBlockedExecutionReply(ctx.sessionKey),
+      );
+      if (blockedExecutionContext) {
+        return {
+          prependContext: blockedExecutionContext,
+        };
+      }
+      let approvalContext;
+      if (actionReviewdEnabled(config.actionReview)) {
+        try {
+          approvalContext = await consumeActionReviewNotes(ctx.sessionKey);
+        } catch (error) {
+          if (actionReviewdRequired(config.actionReview)) {
+            api.logger.warn(
+              `[${LOG_PREFIX}] action reviewd prompt context failed for ${ctx.sessionKey || "unknown"}: ${String(error)}`,
+            );
+            approvalContext = buildApprovalContextResult(ctx.sessionKey || "", [], []);
+          } else {
+            approvalContext = await reconcileApprovalIntent(event, ctx);
+          }
+        }
+      } else {
+        approvalContext = await reconcileApprovalIntent(event, ctx);
+      }
+      if (approvalContext?.prependContext) {
+        clearPendingActionReviewReply(ctx.sessionKey);
+      }
+      const pendingActionReviewContext = buildPendingActionReviewPrependContext(
+        getPendingActionReviewReply(ctx.sessionKey),
+      );
+      if (pendingActionReviewContext) {
+        return {
+          prependContext: pendingActionReviewContext,
+        };
+      }
       const toolNamesByCallId = extractAssistantToolCalls(event.messages);
       const warnedTools = [];
       const quarantinedTools = [];
@@ -3413,6 +3835,7 @@ const plugin = {
         if (!isToolResultMessage(message)) {
           continue;
         }
+        const shouldFlattenHistoricalToolResult = hasLaterConversationTurn(event.messages, index);
 
         const toolCallId =
           typeof message.toolCallId === "string" && message.toolCallId.trim()
@@ -3485,6 +3908,9 @@ const plugin = {
               sessionKey: ctx.sessionKey,
             });
           if (decision.trustClass === "trusted_local" && getSessionTaint(ctx.sessionKey) === "clean") {
+            if (shouldFlattenHistoricalToolResult) {
+              event.messages[index] = flattenHistoricalToolResultMessage(message);
+            }
             continue;
           }
           const text = extractToolResultText(message, config.maxContentChars);
@@ -3525,18 +3951,27 @@ const plugin = {
         await recordIngressReview(entry, review, ctx);
 
         if (review.finalAction === "allow") {
-          event.messages[index] = buildAllowedToolResultMessage(entry, review);
+          const nextMessage = buildAllowedToolResultMessage(entry, review);
+          event.messages[index] = shouldFlattenHistoricalToolResult
+            ? flattenHistoricalToolResultMessage(nextMessage)
+            : nextMessage;
           continue;
         }
 
         if (review.finalAction === "warn") {
-          event.messages[index] = buildWarnedToolResultMessage(entry, review);
+          const nextMessage = buildWarnedToolResultMessage(entry, review);
+          event.messages[index] = shouldFlattenHistoricalToolResult
+            ? flattenHistoricalToolResultMessage(nextMessage)
+            : nextMessage;
           warnedTools.push(`${toolName}${toolCallId ? ` (${toolCallId})` : ""}`);
           updateSessionTaint(ctx.sessionKey, "warned");
           continue;
         }
 
-        event.messages[index] = buildQuarantinedToolResultMessage(message, toolName, review);
+        const nextMessage = buildQuarantinedToolResultMessage(message, toolName, review);
+        event.messages[index] = shouldFlattenHistoricalToolResult
+          ? flattenHistoricalToolResultMessage(nextMessage)
+          : nextMessage;
         quarantinedTools.push(`${toolName}${toolCallId ? ` (${toolCallId})` : ""}`);
         updateSessionTaint(ctx.sessionKey, "quarantined");
       }
@@ -3569,12 +4004,27 @@ const plugin = {
         if (nextMessage !== event.message) {
           clearBlockedExecutionReply(ctx.sessionKey);
           clearAntivirusReplyRequirement(ctx.sessionKey);
+          clearPendingActionReviewReply(ctx.sessionKey);
           return {
             message: nextMessage,
           };
         }
         if (isUserFacingAssistantMessage(event.message)) {
           clearBlockedExecutionReply(ctx.sessionKey);
+        }
+      }
+      const pendingActionReviewReply = getPendingActionReviewReply(ctx.sessionKey);
+      if (pendingActionReviewReply) {
+        const nextMessage = applyPendingActionReviewReply(event.message, pendingActionReviewReply);
+        if (nextMessage !== event.message) {
+          clearPendingActionReviewReply(ctx.sessionKey);
+          clearAntivirusReplyRequirement(ctx.sessionKey);
+          return {
+            message: nextMessage,
+          };
+        }
+        if (isUserFacingAssistantMessage(event.message)) {
+          clearPendingActionReviewReply(ctx.sessionKey);
         }
       }
       const notices = getAntivirusReplyRequirement(ctx.sessionKey);
@@ -3618,7 +4068,7 @@ const plugin = {
     }
 
     api.logger.info(
-      `[${LOG_PREFIX}] ready: ingressBackend=${config.ingressBackend} egressBackend=${config.egressBackend} trustBackend=${config.trustBackend} gatewayReviewTransport=${config.gatewayReviewTransport} gatewayBaseUrl=${config.gatewayBaseUrl} scaMode=${config.sca.mode} execPosture=${config.execPosture?.posture || "unknown"}`,
+      `[${LOG_PREFIX}] ready: ingressBackend=${config.ingressBackend} egressBackend=${config.egressBackend} trustBackend=${config.trustBackend} gatewayReviewTransport=${config.gatewayReviewTransport} gatewayBaseUrl=${config.gatewayBaseUrl} scaMode=${config.sca.mode} actionReviewMode=${config.actionReview.mode} execPosture=${config.execPosture?.posture || "unknown"}`,
     );
   },
 };

@@ -175,7 +175,7 @@ Source of truth for each phase:
 2. scan-daemon-backed malware scans populate antivirus ledger and report entries
 3. scan-daemon-backed package SCA populates SCA ledger and report entries
 4. scan-daemon `auto` mode falls back to local scanning with a degraded warning
-5. live fail-closed smoke judges execution by workspace mutation and ledgers, not only by final assistant text
+5. live fail-closed smoke judges execution by workspace mutation, scanner ledgers, and saved transcript state, not only by the gateway's immediate assistant text
 
 ### Ask Mechanics
 

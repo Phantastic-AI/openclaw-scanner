@@ -7,6 +7,8 @@
 
 The plugin works on its own. If you want stronger isolation, add the optional `openclaw-scand` companion daemon: it runs ClamAV and OSV-Scanner outside the main OpenClaw user, and uses [bubblewrap](https://github.com/containers/bubblewrap) to sandbox OSV-Scanner.
 
+If you also want out-of-band approval for high-impact tool actions, this package ships `openclaw-action-reviewd`: a separate-UID approval service that owns pending action requests, polls a reviewer channel, and grants one-shot approvals outside the main OpenClaw process.
+
 This package includes:
 
 - **Ingress Guard**: review untrusted tool output before the next model turn
@@ -14,6 +16,7 @@ This package includes:
 - **Antivirus Integration**: [ClamAV](https://www.clamav.net/)-backed file scanning for package installs, downloads, and archive extraction
 - **Package SCA**: [OSV-Scanner](https://google.github.io/osv-scanner/) checks package installs for known vulnerable dependencies
 - **Scan Daemon**: optional `openclaw-scand` companion daemon for isolated ClamAV and OSV scanning
+- **Action Review Service**: optional `openclaw-action-reviewd` companion daemon for out-of-band approval of `ask` actions
 - **Exec Posture Warning**: loud degraded-posture reporting when exec-capable tools are enabled
 
 ## Start Here
@@ -25,6 +28,8 @@ openclaw plugins install openclaw-scanner
 ```
 
 Want the isolated scanning setup too? This package also ships `openclaw-scand`, which runs ClamAV and OSV-Scanner outside the main OpenClaw user and sandboxes OSV-Scanner with bubblewrap.
+
+Want out-of-band approval too? This package also ships `openclaw-action-reviewd`, which owns pending `ask` actions and consumes reviewer replies outside the main OpenClaw process. If you use it for exec-capable profiles, disable OpenClaw core `approvals.exec` forwarding on that same profile so there is only one approval authority.
 
 Read next:
 
@@ -115,13 +120,15 @@ Egress guard finds the stored approval and ALLOWS it once
 
 PromptScanner is optional. The default path is gateway-backed review using the models already configured on the OpenClaw install.
 Gateway review now prefers an internal subagent transport and only falls back to gateway HTTP review when loopback + token auth + explicit review endpoints are safely configured.
-If you do not set `trustModel`, `ingressModel`, `egressModel`, or `approvalIntentModel`, the plugin now inherits the pod's configured primary agent model. `approvalIntentModel` falls back to `egressModel` first.
+If you do not set `trustModel`, `ingressModel`, `egressModel`, or `approvalIntentModel`, the plugin now inherits the pod's configured primary agent model. `approvalIntentModel` falls back to `egressModel` first when you keep approval inside OCS.
 
 ## Limitations
 
 - OpenClaw's `before_tool_call` hook only supports allow or block
 - so plugin-grade `ask` still appears as a block on the first attempt
 - the interactive approval loop now happens on the next turn: the plugin reviews the user's latest reply with `approvalIntentModel` and allows the exact pending action once if the user clearly approved it
+- if you enable `openclaw-action-reviewd`, `ask` moves out of the chat turn and into a separate approval service; the user reply in the main session is no longer the approval authority
+- if you enable `openclaw-action-reviewd` for exec-capable profiles, disable OpenClaw core `approvals.exec` forwarding on that same profile; otherwise the agent can receive conflicting approval instructions
 - if exec-capable tools are exposed, OCS reports `degraded_exec_posture`; ingress and egress still work, but same-UID self-tamper resistance is no longer a credible claim
 - live messaging-pod smoke is documented in [docs/SMOKE-TEST.md](./docs/SMOKE-TEST.md)
 - exec-capable canary smoke for scan-daemon-backed download and package-install coverage is documented in [docs/ANTIVIRUS-SMOKE-TEST.md](./docs/ANTIVIRUS-SMOKE-TEST.md)
@@ -395,6 +402,24 @@ The scan daemon improves scanner isolation. It does not move approval ownership 
 The `openclaw-scand` helper binary is packaged with the npm release for ops and deployment flows. A normal `openclaw plugins install openclaw-scanner` install does not require operators to run it directly.
 
 The public config keys still use `scanBrokerMode` and `scanBrokerSocketPath` for compatibility. The component itself is the `openclaw-scand` scan daemon.
+
+## Action Review Service (`openclaw-action-reviewd`)
+
+OCS can optionally hand `ask` approval ownership to a separate-UID local review service:
+
+- `actionReviewMode = auto | required | disabled`
+- `actionReviewSocketPath = /run/openclaw-action-reviewd/ocs.sock`
+
+When enabled, `openclaw-action-reviewd` owns:
+
+- pending action requests
+- one-shot approval grants
+- denial records
+- reviewer-channel polling and intent classification
+
+For exec-capable profiles, `openclaw-action-reviewd` must be the only approval authority. Disable OpenClaw core `approvals.exec` forwarding on the same profile before you turn it on, or the model can surface conflicting approval instructions from two different systems.
+
+This is the slice that starts to improve approval integrity under exec-capable profiles. The plugin still decides whether an action is `allow`, `ask`, or `block`, but the approval itself no longer lives in `openclaw`-owned JSON when `actionReviewMode=required`.
 
 ## Hardening Order
 

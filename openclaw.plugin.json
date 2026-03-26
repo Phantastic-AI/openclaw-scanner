@@ -2,7 +2,7 @@
   "id": "openclaw-scanner",
   "name": "OpenClaw Scanner",
   "description": "OpenClaw Scanner for ingress review and egress blocking.",
-  "version": "0.6.4",
+  "version": "0.7.0",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -177,6 +177,18 @@
         "type": "string",
         "minLength": 1
       },
+      "actionReviewMode": {
+        "type": "string",
+        "enum": [
+          "auto",
+          "disabled",
+          "required"
+        ]
+      },
+      "actionReviewSocketPath": {
+        "type": "string",
+        "minLength": 1
+      },
       "scaWarnUnavailable": {
         "type": "boolean"
       },
@@ -257,6 +269,16 @@
       "label": "Scan Daemon Socket Path",
       "advanced": true,
       "placeholder": "/run/openclaw-scand/ocs.sock"
+    },
+    "actionReviewMode": {
+      "label": "Action Review Mode",
+      "advanced": true,
+      "placeholder": "disabled"
+    },
+    "actionReviewSocketPath": {
+      "label": "Action Review Socket Path",
+      "advanced": true,
+      "placeholder": "/run/openclaw-action-reviewd/ocs.sock"
     },
     "osvScannerPath": {
       "label": "OSV Scanner Path",
