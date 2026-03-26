@@ -5,7 +5,7 @@
   "type": "module",
   "main": "index.mjs",
   "bin": {
-    "openclaw-sec": "bin/openclaw-sec.mjs"
+    "openclaw-scand": "bin/openclaw-scand.mjs"
   },
   "exports": {
     ".": "./index.mjs",

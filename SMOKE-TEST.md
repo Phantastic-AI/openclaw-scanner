@@ -6,7 +6,7 @@ Canonical spec: [OPENCLAW-SCANNER-SPEC.md](./OPENCLAW-SCANNER-SPEC.md)
 This plugin has one repeatable pod smoke path with two phases:
 
 - the live `messaging` gateway for `allow / ask / approve / deny`
-- the coding-profile canary gateway for broker-backed download and package-install scans
+- the coding-profile canary gateway for scan-daemon-backed download and package-install scans
 
 For the lower-level scan-only canary notes, use [ANTIVIRUS-SMOKE-TEST.md](./ANTIVIRUS-SMOKE-TEST.md).
 
@@ -22,17 +22,17 @@ Main messaging gateway:
 Exec-capable canary gateway:
 
 - `posture-report`: exec-capable profile must report `degraded_exec_posture`
-- `download`: broker-backed ClamAV path should record `clean`
-- `package install`: broker-backed ClamAV path should record `clean`
-- `package install`: broker-backed OSV path should record `advisory` for `minimist@0.0.8`
-- optional `fail closed`: stopping `openclaw-sec` must stop the actual package install from mutating the workspace
+- `download`: scan-daemon-backed ClamAV path should record `clean`
+- `package install`: scan-daemon-backed ClamAV path should record `clean`
+- `package install`: scan-daemon-backed OSV path should record `advisory` for `minimist@0.0.8`
+- optional `fail closed`: stopping `openclaw-scand` must stop the actual package install from mutating the workspace
 
 ## What this smoke does not prove
 
 - hard shell-block coverage like `rm -rf`
 - browser or web ingress
 - sandboxed exec attestation
-- perfect user-facing wording for blocked exec-package actions when the broker is down
+- perfect user-facing wording for blocked exec-package actions when the scan daemon is down
 
 ## One-command smoke
 
@@ -46,10 +46,10 @@ Optional session prefix:
 ./smoke/smoke_remote_scanner.sh 51.210.13.102 my-smoke
 ```
 
-Include the negative broker-required check:
+Include the negative scan-daemon-required check:
 
 ```bash
-SMOKE_INCLUDE_BROKER_FAILCLOSED=1 ./smoke/smoke_remote_scanner.sh 51.210.13.102 my-smoke
+SMOKE_INCLUDE_SCAN_DAEMON_FAILCLOSED=1 ./smoke/smoke_remote_scanner.sh 51.210.13.102 my-smoke
 ```
 
 ## How to read the results
@@ -65,9 +65,9 @@ SMOKE_INCLUDE_BROKER_FAILCLOSED=1 ./smoke/smoke_remote_scanner.sh 51.210.13.102 
   - the assistant refuses to retry
   - the deny approval-store entry is `state: "denied"`
 - the canary `posture-report` must show `degraded_exec_posture`
-- the canary `antivirus-report` must show `transport: "openclaw-sec"` and `verdict: "clean"` for the download and package-install sessions
-- the canary `sca-report` must show `transport: "openclaw-sec"` and `verdict: "advisory"` for the `minimist@0.0.8` package-install session
-- the optional broker-required negative check passes only if the workspace check prints `MISSING`
+- the canary `antivirus-report` must show `transport: "openclaw-scand"` and `verdict: "clean"` for the download and package-install sessions
+- the canary `sca-report` must show `transport: "openclaw-scand"` and `verdict: "advisory"` for the `minimist@0.0.8` package-install session
+- the optional scan-daemon-required negative check passes only if the workspace check prints `MISSING`
 
 Important caveat:
 
@@ -75,7 +75,7 @@ Important caveat:
 - for that phase, the source of truth is:
   - workspace path remains absent
   - antivirus/SCA ledgers record `unavailable`
-  - no new broker log record appears for the blocked action
+  - no new scan-daemon log record appears for the blocked action
 
 ## Live evidence notes for this pod
 
@@ -101,10 +101,10 @@ For `qa-062`, the smoke proved:
 - main gateway natural-language `ask -> approve -> send once` passed
 - main gateway natural-language `deny` passed and left a denied approval-store entry
 - canary `posture-report` showed `degraded_exec_posture`
-- canary download recorded broker-backed antivirus `clean`
-- canary package install recorded broker-backed antivirus `clean`
-- canary package install recorded broker-backed OSV `advisory`
-- broker-required negative check left the workspace path absent even though the assistant reply still guessed the package name
+- canary download recorded scan-daemon-backed antivirus `clean`
+- canary package install recorded scan-daemon-backed antivirus `clean`
+- canary package install recorded scan-daemon-backed OSV `advisory`
+- scan-daemon-required negative check left the workspace path absent even though the assistant reply still guessed the package name
 
 ## Troubleshooting
 

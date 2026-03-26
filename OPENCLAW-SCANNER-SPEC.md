@@ -391,17 +391,17 @@ Today OCS does not claim:
 - same-UID approval tamper resistance once exec-capable tools are exposed
 - scanner isolation when scanners are invoked directly by the plugin process
 
-### Stage 1: `openclaw-sec` Scan Broker
+### Stage 1: `openclaw-scand` Scan Daemon
 
-Stage 1 is the optional separate-UID scan broker described in:
+Stage 1 is the optional separate-UID scan daemon described in:
 
-- [OPENCLAW-SEC-BROKER-SPEC.md](./OPENCLAW-SEC-BROKER-SPEC.md)
-- [OPENCLAW-SEC-BROKER-PLAN.md](./OPENCLAW-SEC-BROKER-PLAN.md)
+- [OPENCLAW-SCAND-SPEC.md](./OPENCLAW-SCAND-SPEC.md)
+- [OPENCLAW-SCAND-PLAN.md](./OPENCLAW-SCAND-PLAN.md)
 
 What this stage adds:
 
 - one separate-UID socket boundary for scan requests
-- broker-owned scan logs
+- daemon-owned scan logs
 - `clamd` requests issued outside the `openclaw` UID
 - bubblewrapped `osv-scanner` execution outside the `openclaw` UID
 - one extension surface for future scanner backends
@@ -414,7 +414,7 @@ What this stage does not solve:
 
 ### Stage 2: Separate-UID Approval Control Plane
 
-After the broker is deployed, the next meaningful hardening step is not "more UID checks."
+After the scan daemon is deployed, the next meaningful hardening step is not "more UID checks."
 
 It is:
 
@@ -443,7 +443,7 @@ Current OCS tracks session taint well enough for ingress review, but it does not
 Use two taint stores, not one:
 
 - session taint: in-memory, plugin-owned, ephemeral
-- artifact taint: persisted, content-addressed, and eventually broker-owned
+- artifact taint: persisted, content-addressed, and eventually daemon-owned
 
 Session taint remains cheap conversational state such as `clean | warned | quarantined`.
 Artifact taint becomes per-file or per-package state keyed by the actual bytes being executed or re-read.
@@ -452,7 +452,7 @@ Artifact taint becomes per-file or per-package state keyed by the actual bytes b
 
 Authoritative future home:
 
-- broker-owned SQLite or JSONL store under `openclaw-sec`
+- daemon-owned SQLite or JSONL store under `openclaw-scand`
 - optional filesystem cache via xattrs
 
 Proposed record shape:

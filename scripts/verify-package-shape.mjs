@@ -38,7 +38,7 @@ check('type is "module"', pkg.type === 'module');
 check('license is MIT', pkg.license === 'MIT');
 check('has repository url', !!pkg.repository?.url);
 check('has files array', Array.isArray(pkg.files) && pkg.files.length > 0);
-check('bin.openclaw-sec points to bin/openclaw-sec.mjs', pkg.bin?.['openclaw-sec'] === 'bin/openclaw-sec.mjs');
+check('bin.openclaw-scand points to bin/openclaw-scand.mjs', pkg.bin?.['openclaw-scand'] === 'bin/openclaw-scand.mjs');
 check(
   'openclaw.extensions includes "./index.mjs"',
   Array.isArray(pkg.openclaw?.extensions) && pkg.openclaw.extensions.includes('./index.mjs'),
@@ -50,15 +50,15 @@ const requiredFiles = [
   'openclaw.plugin.json',
   'README.md',
   'LICENSE',
-  'bin/openclaw-sec.mjs',
+  'bin/openclaw-scand.mjs',
   'lib/policy.mjs',
   'lib/cache.mjs',
   'lib/gateway-model.mjs',
   'lib/text.mjs',
   'lib/antivirus.mjs',
-  'lib/scan-broker.mjs',
-  'lib/scan-broker-server.mjs',
-  'lib/openclaw-sec-service.mjs',
+  'lib/scan-daemon.mjs',
+  'lib/scan-daemon-server.mjs',
+  'lib/openclaw-scand-service.mjs',
   'lib/promptscanner-client.mjs',
   'lib/review-ledger-report.mjs',
 ];

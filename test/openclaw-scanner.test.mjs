@@ -24,7 +24,7 @@ import {
 } from "../lib/antivirus.mjs";
 import { buildIngressReview } from "../lib/gateway-model.mjs";
 import { evaluateExecPosture, EXEC_POSTURE_DEGRADED, EXEC_POSTURE_WARNING } from "../lib/posture.mjs";
-import { createScanBrokerServer } from "../lib/scan-broker-server.mjs";
+import { createScanDaemonServer } from "../lib/scan-daemon-server.mjs";
 
 function jsonResponse(payload, status = 200) {
   return new Response(JSON.stringify(payload), {
@@ -221,12 +221,12 @@ async function withFakeClamd(run, options = {}) {
 async function withFakeBroker(run, handlers = {}) {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-scanner-broker-"));
   const socketPath = path.join(tempDir, "ocs.sock");
-  const broker = createScanBrokerServer({
+  const daemon = createScanDaemonServer({
     socketPath,
     handlers: {
       async status() {
         return {
-          backend: "openclaw-sec",
+          backend: "openclaw-scand",
           status: {
             malwareScan: { engine: "clamd", status: "active", protection: "triggered" },
             packageSca: { engine: "osv-scanner", status: "active" },
@@ -266,11 +266,11 @@ async function withFakeBroker(run, handlers = {}) {
       ...handlers,
     },
   });
-  await broker.listen();
+  await daemon.listen();
   try {
     return await run({ socketPath, tempDir });
   } finally {
-    await broker.close();
+    await daemon.close();
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 }
@@ -966,7 +966,7 @@ test("before_prompt_build persists internal review usage in the ingress review l
 });
 
 test("print_review_ledger script renders saved review pointers", () => {
-  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-security-ledger-script-"));
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-scandurity-ledger-script-"));
   const pluginStateDir = path.join(stateDir, "plugins", REVIEW_LEDGER_PLUGIN_ID);
   fs.mkdirSync(pluginStateDir, { recursive: true });
   fs.writeFileSync(
@@ -1099,7 +1099,7 @@ test("ocs OpenClaw CLI report renders saved review pointers", async () => {
 });
 
 test("after_tool_call warns inline when antivirus is unavailable for a file-producing action", async () => {
-  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-security-av-missing-"));
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-scandurity-av-missing-"));
   fs.writeFileSync(path.join(projectDir, "package.json"), '{"name":"av-missing"}\n', "utf8");
 
   const { hooks, stateDir } = registerPlugin(
@@ -1220,7 +1220,7 @@ test("after_tool_call warns inline when antivirus is unavailable for a file-prod
 });
 
 test("resolveImmediateAntivirusWarning reports unavailable when no daemon socket is present", async () => {
-  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-security-av-immediate-"));
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-scandurity-av-immediate-"));
   fs.writeFileSync(path.join(projectDir, "package.json"), '{"name":"av-immediate"}\n', "utf8");
 
   const warning = resolveImmediateAntivirusWarning(
@@ -1238,7 +1238,7 @@ test("resolveImmediateAntivirusWarning reports unavailable when no daemon socket
 });
 
 test("before_message_write prefixes the final assistant reply with the required antivirus warning without before_prompt_build", async () => {
-  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-security-av-assistant-"));
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-scandurity-av-assistant-"));
   fs.writeFileSync(path.join(projectDir, "package.json"), '{"name":"av-assistant"}\n', "utf8");
 
   const { hooks } = registerPlugin(
@@ -1397,7 +1397,7 @@ test("before_message_write prefixes the final assistant reply with the required 
 });
 
 test("antivirus unavailable warning can be suppressed while still recording the event", async () => {
-  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-security-av-silent-"));
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-scandurity-av-silent-"));
   fs.writeFileSync(path.join(projectDir, "package.json"), '{"name":"av-silent"}\n', "utf8");
 
   const { hooks, stateDir } = registerPlugin(
@@ -1495,7 +1495,7 @@ test("antivirus unavailable warning can be suppressed while still recording the 
 
 test("after_tool_call records a clean triggered clamd scan without inline warning", async () => {
   await withFakeClamd(async ({ socketPath }) => {
-    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-security-av-clean-"));
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-scandurity-av-clean-"));
     fs.writeFileSync(path.join(projectDir, "package.json"), '{"name":"av-clean"}\n', "utf8");
 
     const { hooks, stateDir } = registerPlugin(
@@ -1594,7 +1594,7 @@ test("after_tool_call records a clean triggered clamd scan without inline warnin
 });
 
 test("antivirus report script prints status and recent records", async () => {
-  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-security-antivirus-script-"));
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-scandurity-antivirus-script-"));
   const pluginStateDir = resolveReviewLedgerStateDir(stateDir);
   fs.mkdirSync(pluginStateDir, { recursive: true });
   fs.writeFileSync(
@@ -1768,7 +1768,7 @@ test("before_tool_call blocks scan-covered action when scan broker is required b
     trustBackend: "disabled",
     egressBackend: "disabled",
     scanBrokerMode: "required",
-    scanBrokerSocketPath: path.join(os.tmpdir(), "missing-openclaw-sec.sock"),
+    scanBrokerSocketPath: path.join(os.tmpdir(), "missing-openclaw-scand.sock"),
   });
   const beforeToolCall = hooks.get("before_tool_call");
   assert.ok(beforeToolCall);
@@ -1786,7 +1786,7 @@ test("before_tool_call blocks scan-covered action when scan broker is required b
   );
 
   assert.equal(result.block, true);
-  assert.match(result.blockReason, /openclaw-sec is required but unavailable/i);
+  assert.match(result.blockReason, /openclaw-scand is required but unavailable/i);
 });
 
 test("before_message_write replaces a blocked-before-execution package-install reply with deterministic scanner text", async () => {
@@ -1794,7 +1794,7 @@ test("before_message_write replaces a blocked-before-execution package-install r
     trustBackend: "disabled",
     egressBackend: "disabled",
     scanBrokerMode: "required",
-    scanBrokerSocketPath: path.join(os.tmpdir(), "missing-openclaw-sec.sock"),
+    scanBrokerSocketPath: path.join(os.tmpdir(), "missing-openclaw-scand.sock"),
   });
   const beforeToolCall = hooks.get("before_tool_call");
   const beforeMessageWrite = hooks.get("before_message_write");
@@ -1816,7 +1816,7 @@ test("before_message_write replaces a blocked-before-execution package-install r
   );
 
   assert.equal(blocked.block, true);
-  assert.match(blocked.blockReason, /openclaw-sec is required but unavailable/i);
+  assert.match(blocked.blockReason, /openclaw-scand is required but unavailable/i);
 
   const interim = beforeMessageWrite(
     {
@@ -1844,7 +1844,7 @@ test("before_message_write replaces a blocked-before-execution package-install r
 
   assert.match(
     replaced.message.content[0].text,
-    /^OpenClaw Scanner blocked this package install action because openclaw-sec is required but unavailable\./,
+    /^OpenClaw Scanner blocked this package install action because openclaw-scand is required but unavailable\./,
   );
   assert.match(replaced.message.content[0].text, /The tool did not run and no side effects occurred\./);
   assert.doesNotMatch(replaced.message.content[0].text, /\bis-number\b/);
@@ -2042,11 +2042,11 @@ test("after_tool_call records broker-backed malware and SCA results", async () =
       write: () => {},
     });
 
-    assert.equal(antivirusReport.status.transport, "openclaw-sec");
-    assert.equal(antivirusReport.records[0].transport, "openclaw-sec");
+    assert.equal(antivirusReport.status.transport, "openclaw-scand");
+    assert.equal(antivirusReport.records[0].transport, "openclaw-scand");
     assert.equal(antivirusReport.records[0].verdict, "clean");
-    assert.equal(scaReport.status.transport, "openclaw-sec");
-    assert.equal(scaReport.records[0].transport, "openclaw-sec");
+    assert.equal(scaReport.status.transport, "openclaw-scand");
+    assert.equal(scaReport.records[0].transport, "openclaw-scand");
     assert.equal(scaReport.records[0].verdict, "advisory");
     assert.equal(scaReport.records[0].advisories[0].packageName, "left-pad");
   });

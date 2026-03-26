@@ -49,14 +49,14 @@ import {
   sanitizeCallerId,
 } from "./lib/text.mjs";
 import {
-  buildRequiredBrokerBlockReason,
-  buildScanBrokerRequest,
-  getScanBrokerStatus,
-  normalizeScanBrokerConfig,
-  requestScanBroker,
-  scanBrokerEnabled,
-  scanBrokerRequired,
-} from "./lib/scan-broker.mjs";
+  buildRequiredScanDaemonBlockReason,
+  buildScanDaemonRequest,
+  getScanDaemonStatus,
+  normalizeScanDaemonConfig,
+  requestScanDaemon,
+  scanDaemonEnabled,
+  scanDaemonRequired,
+} from "./lib/scan-daemon.mjs";
 import {
   REVIEW_LEDGER_CLI_COMMAND,
   REVIEW_LEDGER_PLUGIN_ID,
@@ -215,7 +215,7 @@ function normalizeConfig(rawConfig, fullConfig) {
     headlessAskPolicy: String(raw.headlessAskPolicy || "block").trim().toLowerCase(),
     antivirus: normalizeAntivirusConfig(raw),
     sca: normalizeScaConfig(raw),
-    scanBroker: normalizeScanBrokerConfig(raw),
+    scanBroker: normalizeScanDaemonConfig(raw),
     execPosture: evaluateExecPosture(fullConfig),
   };
 }
@@ -1489,14 +1489,14 @@ const plugin = {
       return {
         ...status,
         ...extra,
-        transport: "openclaw-sec",
-        broker: "openclaw-sec",
+        transport: "openclaw-scand",
+        broker: "openclaw-scand",
         socketPath: config.scanBroker.socketPath,
       };
     }
 
     function buildBrokerRequestForAction(op, action, ctx = {}, event = {}) {
-      return buildScanBrokerRequest({
+      return buildScanDaemonRequest({
         op,
         sessionKey: ctx.sessionKey || action?.sessionKey || "unknown",
         toolCallId: event.toolCallId || action?.toolCallId || undefined,
@@ -1506,7 +1506,7 @@ const plugin = {
     }
 
     async function requestBrokerStatus(action) {
-      const response = await getScanBrokerStatus(config.scanBroker, {
+      const response = await getScanDaemonStatus(config.scanBroker, {
         timeoutMs: resolveScanBrokerTimeout(
           config.antivirus.scanTimeoutMs,
           config.sca.scanTimeoutMs,
@@ -1519,7 +1519,7 @@ const plugin = {
           : undefined,
       });
       if (!response.ok) {
-        throw new Error(response.message || response.reasonCode || "scan broker status failed");
+        throw new Error(response.message || response.reasonCode || "scan daemon status failed");
       }
       return response;
     }
@@ -1534,14 +1534,14 @@ const plugin = {
     }
 
     async function ensureRequiredScanBrokerAvailability(action) {
-      if (!action || !scanBrokerRequired(config.scanBroker)) {
+      if (!action || !scanDaemonRequired(config.scanBroker)) {
         return undefined;
       }
       try {
         await requestBrokerStatus(action);
         return undefined;
       } catch {
-        return buildRequiredBrokerBlockReason(action.kind);
+        return buildRequiredScanDaemonBlockReason(action.kind);
       }
     }
 
@@ -1549,7 +1549,7 @@ const plugin = {
       if (!shouldRunScaForAction(action) || config.sca.mode !== "required") {
         return undefined;
       }
-      if (scanBrokerEnabled(config.scanBroker)) {
+      if (scanDaemonEnabled(config.scanBroker)) {
         try {
           const brokerStatus = await requestBrokerStatus(action);
           const packageSca = brokerStatus?.status?.packageSca;
@@ -1567,12 +1567,12 @@ const plugin = {
             }
             return undefined;
           }
-          if (scanBrokerRequired(config.scanBroker)) {
-            return buildRequiredBrokerBlockReason(action.kind);
+          if (scanDaemonRequired(config.scanBroker)) {
+            return buildRequiredScanDaemonBlockReason(action.kind);
           }
         } catch (error) {
-          if (scanBrokerRequired(config.scanBroker)) {
-            return buildRequiredBrokerBlockReason(action.kind);
+          if (scanDaemonRequired(config.scanBroker)) {
+            return buildRequiredScanDaemonBlockReason(action.kind);
           }
           logScanBrokerFallback(action, "status", error);
         }
@@ -1600,9 +1600,9 @@ const plugin = {
         scannedRoots: action.roots || [],
       };
 
-      if (scanBrokerEnabled(config.scanBroker)) {
+      if (scanDaemonEnabled(config.scanBroker)) {
         try {
-          const response = await requestScanBroker(
+          const response = await requestScanDaemon(
             config.scanBroker,
             buildBrokerRequestForAction("package_sca", action, ctx, event),
             {
@@ -1610,7 +1610,7 @@ const plugin = {
             },
           );
           if (!response.ok) {
-            throw new Error(response.message || response.reasonCode || "broker package_sca failed");
+            throw new Error(response.message || response.reasonCode || "scan daemon package_sca failed");
           }
 
           const backend = normalizeBrokerStatus({
@@ -1625,7 +1625,7 @@ const plugin = {
             ...baseRecord,
             engine: backend.engine || "unknown",
             status: backend.status || "unknown",
-            transport: "openclaw-sec",
+            transport: "openclaw-scand",
             verdict: response.verdict || "error",
             scannedRoots: response.scannedRoots || [],
             advisories: response.advisories || [],
@@ -1700,7 +1700,7 @@ const plugin = {
           });
           return record;
         } catch (error) {
-          if (scanBrokerRequired(config.scanBroker)) {
+          if (scanDaemonRequired(config.scanBroker)) {
             const backend = normalizeBrokerStatus({
               engine: "osv-scanner",
               status: "unavailable",
@@ -1712,7 +1712,7 @@ const plugin = {
               ...baseRecord,
               engine: backend.engine,
               status: backend.status,
-              transport: "openclaw-sec",
+              transport: "openclaw-scand",
               verdict: "unavailable",
               advisories: [],
               errors: [{ detail: String(error) }],
@@ -1833,9 +1833,9 @@ const plugin = {
         targetPaths: action.roots || [],
       };
 
-      if (scanBrokerEnabled(config.scanBroker)) {
+      if (scanDaemonEnabled(config.scanBroker)) {
         try {
-          const response = await requestScanBroker(
+          const response = await requestScanDaemon(
             config.scanBroker,
             buildBrokerRequestForAction("malware_scan", action, ctx, event),
             {
@@ -1843,7 +1843,7 @@ const plugin = {
             },
           );
           if (!response.ok) {
-            throw new Error(response.message || response.reasonCode || "broker malware_scan failed");
+            throw new Error(response.message || response.reasonCode || "scan daemon malware_scan failed");
           }
 
           const backend = normalizeBrokerStatus({
@@ -1858,7 +1858,7 @@ const plugin = {
             ...baseRecord,
             protection: backend.protection || "unknown",
             status: backend.status || "unknown",
-            transport: "openclaw-sec",
+            transport: "openclaw-scand",
             verdict: response.verdict || "error",
             onAccessRoots: response.onAccessRoots || [],
             coveredPaths: response.coveredPaths || [],
@@ -1937,7 +1937,7 @@ const plugin = {
           });
           return record;
         } catch (error) {
-          if (scanBrokerRequired(config.scanBroker)) {
+          if (scanDaemonRequired(config.scanBroker)) {
             const backend = normalizeBrokerStatus({
               status: "unavailable",
               protection: "unavailable",
@@ -1949,7 +1949,7 @@ const plugin = {
               ...baseRecord,
               protection: backend.protection,
               status: backend.status,
-              transport: "openclaw-sec",
+              transport: "openclaw-scand",
               verdict: "unavailable",
               findings: [],
               errors: [{ detail: String(error) }],
@@ -3287,7 +3287,7 @@ const plugin = {
       const pendingAntivirusAction = getAntivirusPlan(toolCallId);
       const antivirusWarning =
         takeAntivirusToolWarning(toolCallId) ||
-        (pendingAntivirusAction && !scanBrokerEnabled(config.scanBroker)
+        (pendingAntivirusAction && !scanDaemonEnabled(config.scanBroker)
           ? resolveImmediateAntivirusWarning(config.antivirus, pendingAntivirusAction.roots || [])
           : undefined);
       const scaWarning = takeScaToolWarning(toolCallId);

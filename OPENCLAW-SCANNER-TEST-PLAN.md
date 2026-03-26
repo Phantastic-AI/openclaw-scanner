@@ -20,8 +20,8 @@ The point of this plan is not to test every idea. It is to prove the small core 
 6. cache hits do not weaken taint-sensitive decisions
 7. exec-capable posture downgrades are surfaced honestly
 8. package-install scanning records clean, advisory, and unavailable states correctly
-9. broker-required mode fails closed for covered scan actions when the broker is unavailable
-10. broker-backed scans populate the same ledgers and reports as direct local scans
+9. scan-daemon-required mode fails closed for covered scan actions when the scan daemon is unavailable
+10. scan-daemon-backed scans populate the same ledgers and reports as direct local scans
 
 ## Test Layers
 
@@ -67,10 +67,10 @@ Before shipping a pod-facing build, rerun the live smoke matrix on a real host:
    - natural-language `deny`
 2. exec-capable canary:
    - `posture-report`
-   - broker-backed download
-   - broker-backed package install
-   - broker-backed SCA advisory
-   - optional broker-required fail-closed check
+   - scan-daemon-backed download
+   - scan-daemon-backed package install
+   - scan-daemon-backed SCA advisory
+   - optional scan-daemon-required fail-closed check
 
 Source of truth for each phase:
 
@@ -80,11 +80,11 @@ Source of truth for each phase:
   - security log shows `egress_allow_approved`
 - messaging deny:
   - approval store shows `state: "denied"`
-- broker-backed download/package install:
-  - antivirus report shows `transport: "openclaw-sec"`
-- broker-backed SCA:
-  - SCA report shows `transport: "openclaw-sec"` and expected advisory ids
-- broker-required fail-closed:
+- scan-daemon-backed download/package install:
+  - antivirus report shows `transport: "openclaw-scand"`
+- scan-daemon-backed SCA:
+  - SCA report shows `transport: "openclaw-scand"` and expected advisory ids
+- scan-daemon-required fail-closed:
   - workspace path stays absent
   - do not trust the assistant reply alone
 
@@ -169,12 +169,12 @@ Source of truth for each phase:
 4. package installs with clean OSV output record `clean`
 5. SCA report renders status and recent advisory records
 
-### Scan Broker
+### Scan Daemon
 
-1. required broker mode blocks scan-covered actions when the broker socket is unavailable
-2. broker-backed malware scans populate antivirus ledger and report entries
-3. broker-backed package SCA populates SCA ledger and report entries
-4. broker `auto` mode falls back to local scanning with a degraded warning
+1. required scan-daemon mode blocks scan-covered actions when the scan-daemon socket is unavailable
+2. scan-daemon-backed malware scans populate antivirus ledger and report entries
+3. scan-daemon-backed package SCA populates SCA ledger and report entries
+4. scan-daemon `auto` mode falls back to local scanning with a degraded warning
 5. live fail-closed smoke judges execution by workspace mutation and ledgers, not only by final assistant text
 
 ### Ask Mechanics

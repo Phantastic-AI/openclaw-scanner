@@ -7,23 +7,23 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 
 import {
-  buildScanBrokerRequest,
-  normalizeScanBrokerConfig,
-  requestScanBroker,
-} from "../lib/scan-broker.mjs";
-import { createScanBrokerServer } from "../lib/scan-broker-server.mjs";
+  buildScanDaemonRequest,
+  normalizeScanDaemonConfig,
+  requestScanDaemon,
+} from "../lib/scan-daemon.mjs";
+import { createScanDaemonServer } from "../lib/scan-daemon-server.mjs";
 import {
   buildOsvBubblewrapArgs,
-  createOpenclawSecHandlers,
-  normalizeOpenclawSecConfig,
-} from "../lib/openclaw-sec-service.mjs";
+  createOpenclawScandHandlers,
+  normalizeOpenclawScandConfig,
+} from "../lib/openclaw-scand-service.mjs";
 
 function writeExecutableScript(filePath, source) {
   fs.writeFileSync(filePath, source, { encoding: "utf8", mode: 0o755 });
 }
 
 async function withFakeClamd(run, options = {}) {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-sec-clamd-"));
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-scand-clamd-"));
   const socketPath = path.join(tempDir, "clamd.sock");
   const responses = options.responses || {};
   const server = net.createServer((socket) => {
@@ -55,15 +55,15 @@ async function withFakeClamd(run, options = {}) {
   }
 }
 
-test("scan broker client round-trips a status request over a Unix socket", async () => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-sec-socket-"));
+test("scan daemon client round-trips a status request over a Unix socket", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-scand-socket-"));
   const socketPath = path.join(tempDir, "ocs.sock");
-  const broker = createScanBrokerServer({
+  const daemon = createScanDaemonServer({
     socketPath,
     handlers: {
       async status() {
         return {
-          backend: "openclaw-sec",
+          backend: "openclaw-scand",
           status: {
             malwareScan: { engine: "clamd", status: "active" },
             packageSca: { engine: "osv-scanner", status: "active" },
@@ -72,31 +72,31 @@ test("scan broker client round-trips a status request over a Unix socket", async
       },
     },
   });
-  await broker.listen();
+  await daemon.listen();
 
   try {
-    const response = await requestScanBroker(
-      normalizeScanBrokerConfig({
+    const response = await requestScanDaemon(
+      normalizeScanDaemonConfig({
         scanBrokerMode: "required",
         scanBrokerSocketPath: socketPath,
       }),
-      buildScanBrokerRequest({ op: "status" }),
+      buildScanDaemonRequest({ op: "status" }),
     );
     assert.equal(response.ok, true);
-    assert.equal(response.backend, "openclaw-sec");
+    assert.equal(response.backend, "openclaw-scand");
     assert.equal(response.status.malwareScan.status, "active");
     assert.equal(response.status.packageSca.status, "active");
   } finally {
-    await broker.close();
+    await daemon.close();
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
 
-test("openclaw-sec packageSca returns advisories through fake bubblewrap and fake osv-scanner", async () => {
-  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-sec-osv-project-"));
+test("openclaw-scand packageSca returns advisories through fake bubblewrap and fake osv-scanner", async () => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-scand-osv-project-"));
   fs.writeFileSync(path.join(projectDir, "package-lock.json"), '{"name":"demo"}\n', "utf8");
 
-  const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-sec-osv-bin-"));
+  const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-scand-osv-bin-"));
   const fakeOsvPath = path.join(binDir, "osv-scanner");
   const fakeBwrapPath = path.join(binDir, "bwrap");
 
@@ -132,7 +132,7 @@ exec "$@"
 `,
   );
 
-  const config = normalizeOpenclawSecConfig({
+  const config = normalizeOpenclawScandConfig({
     socketPath: path.join(projectDir, "ignored.sock"),
     logPath: path.join(projectDir, "ignored.jsonl"),
     osvScannerPath: fakeOsvPath,
@@ -150,7 +150,7 @@ exec "$@"
   assert.match(args.join(" "), /--ro-bind/);
   assert.match(args.join(" "), /--tmpfs \/tmp/);
 
-  const handlers = createOpenclawSecHandlers(config);
+  const handlers = createOpenclawScandHandlers(config);
   const response = await handlers.packageSca({
     roots: [projectDir],
   });
@@ -162,17 +162,17 @@ exec "$@"
   assert.equal(response.advisories[0].packageName, "left-pad");
 });
 
-test("openclaw-sec malwareScan returns clean through fake clamd", async () => {
-  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-sec-av-project-"));
+test("openclaw-scand malwareScan returns clean through fake clamd", async () => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-scand-av-project-"));
   fs.writeFileSync(path.join(projectDir, "package.json"), '{"name":"demo"}\n', "utf8");
 
   await withFakeClamd(async ({ socketPath }) => {
-    const config = normalizeOpenclawSecConfig({
+    const config = normalizeOpenclawScandConfig({
       socketPath: path.join(projectDir, "ignored.sock"),
       logPath: path.join(projectDir, "ignored.jsonl"),
       antivirusSocketPath: socketPath,
     });
-    const handlers = createOpenclawSecHandlers(config);
+    const handlers = createOpenclawScandHandlers(config);
     const response = await handlers.malwareScan({
       roots: [projectDir],
     });
@@ -185,13 +185,13 @@ test("openclaw-sec malwareScan returns clean through fake clamd", async () => {
   });
 });
 
-test("openclaw-sec executable prints help", () => {
-  const binPath = path.join(process.cwd(), "bin", "openclaw-sec.mjs");
+test("openclaw-scand executable prints help", () => {
+  const binPath = path.join(process.cwd(), "bin", "openclaw-scand.mjs");
   const result = spawnSync(process.execPath, [binPath, "--help"], {
     encoding: "utf8",
   });
 
   assert.equal(result.status, 0);
-  assert.match(result.stdout, /Usage: openclaw-sec/);
+  assert.match(result.stdout, /Usage: openclaw-scand/);
   assert.match(result.stdout, /--socket-path/);
 });

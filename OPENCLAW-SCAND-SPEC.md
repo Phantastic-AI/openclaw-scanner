@@ -1,8 +1,8 @@
-# openclaw-sec Broker Spec
+# openclaw-scand Daemon Spec
 
 Last updated: 2026-03-25
 
-Canonical markdown: [OPENCLAW-SEC-BROKER-SPEC.md](./OPENCLAW-SEC-BROKER-SPEC.md)
+Canonical markdown: [OPENCLAW-SCAND-SPEC.md](./OPENCLAW-SCAND-SPEC.md)
 
 ## Status
 
@@ -12,7 +12,7 @@ It is intentionally scoped to scanning only:
 
 - malware scanning
 - package vulnerability scanning
-- broker-owned scan logs
+- daemon-owned scan logs
 
 It does not move approval state out of OCS yet.
 
@@ -56,19 +56,19 @@ Today OCS cannot honestly claim:
 - same-UID self-tamper resistance for approval state
 - scanner isolation when `osv-scanner` is executed directly by OCS
 
-### What this broker changes
+### What this daemon changes
 
-After `openclaw-sec` exists, OCS can additionally claim:
+After `openclaw-scand` exists, OCS can additionally claim:
 
 - scan execution crosses a separate-UID boundary
 - scan logs are owned by a separate UID
-- `osv-scanner` runs inside a broker-controlled sandbox instead of directly under `openclaw`
+- `osv-scanner` runs inside a daemon-controlled sandbox instead of directly under `openclaw`
 
-After `openclaw-sec` exists, OCS still cannot claim:
+After `openclaw-scand` exists, OCS still cannot claim:
 
 - approval integrity across a fully compromised `openclaw` process
 
-That is the next slice after the broker.
+That is the next slice after the scan daemon.
 
 ## Component Split
 
@@ -82,32 +82,32 @@ Runs:
 
 May do:
 
-- request scans from the broker
+- request scans from the scan daemon
 
 May not own:
 
-- broker logs
-- broker config
-- broker socket directory
+- daemon logs
+- daemon config
+- daemon socket directory
 
-### `openclaw-sec`
+### `openclaw-scand`
 
 Runs:
 
-- `openclaw-sec` broker service
+- `openclaw-scand` scan daemon service
 
 Owns:
 
-- broker socket
-- broker config
-- broker logs
+- daemon socket
+- daemon config
+- daemon logs
 
 Performs:
 
 - `clamd` requests
 - bubblewrapped `osv-scanner` runs
 - response normalization
-- broker-level structured logging
+- daemon-level structured logging
 
 ### `clamd`
 
@@ -121,23 +121,25 @@ This spec does not replace it or wrap it.
 
 Will later become:
 
-- another backend behind the same broker API
+- another backend behind the same daemon API
 
-## Broker Modes
+## Scan Daemon Modes
+
+The public config keys keep the existing `scanBroker*` names for compatibility.
 
 OCS gets two new config knobs:
 
 - `scanBrokerMode = auto | required | disabled`
-- `scanBrokerSocketPath = /run/openclaw-sec/ocs.sock`
+- `scanBrokerSocketPath = /run/openclaw-scand/ocs.sock`
 
 Semantics:
 
 - `required`
-  - all covered scan actions must use the broker
+  - all covered scan actions must use the scan daemon
   - no silent fallback
-  - broker unavailable => fail closed for scan-covered actions
+  - scan daemon unavailable => fail closed for scan-covered actions
 - `auto`
-  - prefer the broker
+  - prefer the scan daemon
   - if unavailable, fall back to current direct local scan path
   - emit a loud degraded warning
 - `disabled`
@@ -145,7 +147,7 @@ Semantics:
 
 ## Covered Actions
 
-The broker handles:
+The scan daemon handles:
 
 - `malware_scan`
   - downloads
@@ -162,11 +164,11 @@ OCS remains responsible for detecting the action class.
 
 ### Path
 
-- `/run/openclaw-sec/ocs.sock`
+- `/run/openclaw-scand/ocs.sock`
 
 ### Ownership
 
-- owner: `openclaw-sec`
+- owner: `openclaw-scand`
 - group: `openclaw`
 - mode: `0660`
 
@@ -174,7 +176,7 @@ OCS remains responsible for detecting the action class.
 
 The socket is a local host boundary, not a network API.
 
-The broker should use peer credential checks where available and only serve local clients.
+The scan daemon should use peer credential checks where available and only serve local clients.
 
 ## Protocol
 
@@ -216,9 +218,9 @@ Protocol is newline-delimited JSON over the Unix socket.
 
 ### Failure contract
 
-The broker always returns a structured response.
+The scan daemon always returns a structured response.
 
-If the broker cannot perform the request, it returns:
+If the scan daemon cannot perform the request, it returns:
 
 - `ok: false`
 - a concrete `reasonCode`
@@ -263,7 +265,7 @@ Important limit:
 
 In this slice, only `osv-scanner` is bubblewrapped.
 
-The broker itself is not bubblewrapped.
+The scan daemon itself is not bubblewrapped.
 
 Required `bwrap` properties:
 
@@ -281,22 +283,22 @@ Current deployment note:
 The sandbox must not have write access to:
 
 - `~/.openclaw`
-- broker logs
-- broker config
+- daemon logs
+- daemon config
 - host secret paths
 
 Known gap:
 
-- `osv-scanner` still runs under the `openclaw-sec` service UID in this slice
-- if we later want stronger parser isolation, we can add a dedicated scan worker UID behind the same broker API
+- `osv-scanner` still runs under the `openclaw-scand` service UID in this slice
+- if we later want stronger parser isolation, we can add a dedicated scan worker UID behind the same scan-daemon API
 
 ## Logging
 
-Broker logs are written only by `openclaw-sec`.
+Daemon logs are written only by `openclaw-scand`.
 
 ### Path
 
-- `/var/log/openclaw-sec/scans.jsonl`
+- `/var/log/openclaw-scand/scans.jsonl`
 
 ### Record shape
 
@@ -314,15 +316,15 @@ Each record should contain:
 - reasonCode
 - summary counts only
 
-The broker log must not store raw quarantined tool content.
+The daemon log must not store raw quarantined tool content.
 
 ## Install Model
 
 The public scanner repo owns:
 
-- broker protocol
-- broker client
-- broker service source
+- daemon protocol
+- daemon client
+- daemon service source
 
 The private ops repo owns:
 
@@ -336,13 +338,13 @@ This keeps the product surface public while keeping host mutation logic in ops.
 
 ## Install Flow
 
-1. Create `openclaw-sec` system user.
-2. Install broker files to `/opt/openclaw-sec/current`.
-3. Install `openclaw-sec.service`.
-4. Create `/run/openclaw-sec`.
-5. Create `/var/log/openclaw-sec`.
+1. Create `openclaw-scand` system user.
+2. Install daemon files to `/opt/openclaw-scand/current`.
+3. Install `openclaw-scand.service`.
+4. Create `/run/openclaw-scand`.
+5. Create `/var/log/openclaw-scand`.
 6. Install `bubblewrap`.
-7. Ensure broker can reach `clamd` socket if present.
+7. Ensure the scan daemon can reach `clamd` socket if present.
 8. Start and enable the service.
 9. Set OCS `scanBrokerMode=required` on hardened pods.
 
@@ -354,7 +356,7 @@ Install must be idempotent.
 2. Stop and disable the service.
 3. Remove the unit and runtime dir.
 4. Optionally purge logs with an explicit flag.
-5. Optionally remove the `openclaw-sec` user with an explicit flag.
+5. Optionally remove the `openclaw-scand` user with an explicit flag.
 
 Uninstall must be boring. No hidden migration or destructive cleanup by default.
 
@@ -365,22 +367,22 @@ OCS remains the caller and policy owner.
 OCS must:
 
 - detect covered actions
-- call broker when broker mode requires or prefers it
-- normalize broker responses into existing OCS ledgers and warnings
+- call the scan daemon when scan-daemon mode requires or prefers it
+- normalize scan-daemon responses into existing OCS ledgers and warnings
 - keep `degraded_exec_posture` honest
 
 OCS must not:
 
-- silently claim broker isolation when it is in `auto` fallback mode
-- claim approval isolation after the broker lands
+- silently claim scan-daemon isolation when it is in `auto` fallback mode
+- claim approval isolation after the scan daemon lands
 
 ## Deferred Work
 
-After this broker is complete, the next hardening slice is:
+After this scan daemon is complete, the next hardening slice is:
 
 - move approval ownership and approval logging out of `openclaw` and into a separate-UID control plane
 - make that control plane the authority for approval issuance and consumption, instead of shared JSON files owned by `openclaw`
-- keep the scanner broker and approval control plane separable at the API level, even if they later share one daemon
+- keep the scan daemon and approval control plane separable at the API level, even if they later share one daemon
 
 This is not a generic "UID check."
 

@@ -5,18 +5,18 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
-import { createScanBrokerServer } from "../lib/scan-broker-server.mjs";
+import { createScanDaemonServer } from "../lib/scan-daemon-server.mjs";
 import {
-  DEFAULT_OPENCLAW_SEC_LOG_PATH,
-  createOpenclawSecHandlers,
-  normalizeOpenclawSecConfig,
-} from "../lib/openclaw-sec-service.mjs";
-import { DEFAULT_SCAN_BROKER_SOCKET_PATH } from "../lib/scan-broker.mjs";
+  DEFAULT_OPENCLAW_SCAND_LOG_PATH,
+  createOpenclawScandHandlers,
+  normalizeOpenclawScandConfig,
+} from "../lib/openclaw-scand-service.mjs";
+import { DEFAULT_SCAN_DAEMON_SOCKET_PATH } from "../lib/scan-daemon.mjs";
 
 function printHelp() {
   process.stdout.write(
     [
-      "Usage: openclaw-sec [serve] [options]",
+      "Usage: openclaw-scand [serve] [options]",
       "",
       "Options:",
       "  --socket-path <path>           Unix socket path",
@@ -30,14 +30,14 @@ function printHelp() {
       "  --help                         Show this help text",
       "",
       "Environment overrides:",
-      "  OPENCLAW_SEC_SOCKET_PATH",
-      "  OPENCLAW_SEC_LOG_PATH",
-      "  OPENCLAW_SEC_CLAMD_SOCKET_PATH",
-      "  OPENCLAW_SEC_CLAMD_CONFIG_PATH",
-      "  OPENCLAW_SEC_ANTIVIRUS_TIMEOUT_MS",
-      "  OPENCLAW_SEC_OSV_SCANNER_PATH",
-      "  OPENCLAW_SEC_SCA_TIMEOUT_MS",
-      "  OPENCLAW_SEC_BWRAP_PATH",
+      "  OPENCLAW_SCAND_SOCKET_PATH",
+      "  OPENCLAW_SCAND_LOG_PATH",
+      "  OPENCLAW_SCAND_CLAMD_SOCKET_PATH",
+      "  OPENCLAW_SCAND_CLAMD_CONFIG_PATH",
+      "  OPENCLAW_SCAND_ANTIVIRUS_TIMEOUT_MS",
+      "  OPENCLAW_SCAND_OSV_SCANNER_PATH",
+      "  OPENCLAW_SCAND_SCA_TIMEOUT_MS",
+      "  OPENCLAW_SCAND_BWRAP_PATH",
       "",
     ].join("\n"),
   );
@@ -85,31 +85,31 @@ async function main() {
   }
 
   const version = await loadPackageVersion();
-  const config = normalizeOpenclawSecConfig({
-    socketPath: args["socket-path"] || process.env.OPENCLAW_SEC_SOCKET_PATH || DEFAULT_SCAN_BROKER_SOCKET_PATH,
-    logPath: args["log-path"] || process.env.OPENCLAW_SEC_LOG_PATH || DEFAULT_OPENCLAW_SEC_LOG_PATH,
+  const config = normalizeOpenclawScandConfig({
+    socketPath: args["socket-path"] || process.env.OPENCLAW_SCAND_SOCKET_PATH || DEFAULT_SCAN_DAEMON_SOCKET_PATH,
+    logPath: args["log-path"] || process.env.OPENCLAW_SCAND_LOG_PATH || DEFAULT_OPENCLAW_SCAND_LOG_PATH,
     antivirusSocketPath:
-      args["clamd-socket-path"] || process.env.OPENCLAW_SEC_CLAMD_SOCKET_PATH,
+      args["clamd-socket-path"] || process.env.OPENCLAW_SCAND_CLAMD_SOCKET_PATH,
     antivirusClamdConfigPath:
-      args["clamd-config-path"] || process.env.OPENCLAW_SEC_CLAMD_CONFIG_PATH,
+      args["clamd-config-path"] || process.env.OPENCLAW_SCAND_CLAMD_CONFIG_PATH,
     antivirusScanTimeoutMs:
-      Number(args["antivirus-timeout-ms"] || process.env.OPENCLAW_SEC_ANTIVIRUS_TIMEOUT_MS),
-    osvScannerPath: args["osv-scanner-path"] || process.env.OPENCLAW_SEC_OSV_SCANNER_PATH,
-    scaScanTimeoutMs: Number(args["sca-timeout-ms"] || process.env.OPENCLAW_SEC_SCA_TIMEOUT_MS),
-    bwrapPath: args["bwrap-path"] || process.env.OPENCLAW_SEC_BWRAP_PATH,
+      Number(args["antivirus-timeout-ms"] || process.env.OPENCLAW_SCAND_ANTIVIRUS_TIMEOUT_MS),
+    osvScannerPath: args["osv-scanner-path"] || process.env.OPENCLAW_SCAND_OSV_SCANNER_PATH,
+    scaScanTimeoutMs: Number(args["sca-timeout-ms"] || process.env.OPENCLAW_SCAND_SCA_TIMEOUT_MS),
+    bwrapPath: args["bwrap-path"] || process.env.OPENCLAW_SCAND_BWRAP_PATH,
     version,
   });
 
-  const broker = createScanBrokerServer({
+  const daemon = createScanDaemonServer({
     socketPath: config.socketPath,
     logPath: config.logPath,
     logger: console,
-    handlers: createOpenclawSecHandlers(config),
+    handlers: createOpenclawScandHandlers(config),
   });
 
   const shutdown = async (signal) => {
     try {
-      await broker.close();
+      await daemon.close();
     } finally {
       if (signal) {
         process.exit(0);
@@ -119,25 +119,24 @@ async function main() {
 
   process.on("SIGINT", () => {
     shutdown("SIGINT").catch((error) => {
-      console.error(`[openclaw-sec] shutdown failed: ${String(error)}`);
+      console.error(`[openclaw-scand] shutdown failed: ${String(error)}`);
       process.exit(1);
     });
   });
   process.on("SIGTERM", () => {
     shutdown("SIGTERM").catch((error) => {
-      console.error(`[openclaw-sec] shutdown failed: ${String(error)}`);
+      console.error(`[openclaw-scand] shutdown failed: ${String(error)}`);
       process.exit(1);
     });
   });
 
-  await broker.listen();
+  await daemon.listen();
   console.log(
-    `[openclaw-sec] listening on ${config.socketPath} logPath=${config.logPath} version=${config.version || "unknown"}`,
+    `[openclaw-scand] listening on ${config.socketPath} logPath=${config.logPath} version=${config.version || "unknown"}`,
   );
 }
 
 main().catch((error) => {
-  console.error(`[openclaw-sec] fatal: ${String(error)}`);
+  console.error(`[openclaw-scand] fatal: ${String(error)}`);
   process.exit(1);
 });
-

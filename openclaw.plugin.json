@@ -249,14 +249,14 @@
       "placeholder": "auto"
     },
     "scanBrokerMode": {
-      "label": "Scan Broker Mode",
+      "label": "Scan Daemon Mode",
       "advanced": true,
       "placeholder": "auto"
     },
     "scanBrokerSocketPath": {
-      "label": "Scan Broker Socket Path",
+      "label": "Scan Daemon Socket Path",
       "advanced": true,
-      "placeholder": "/run/openclaw-sec/ocs.sock"
+      "placeholder": "/run/openclaw-scand/ocs.sock"
     },
     "osvScannerPath": {
       "label": "OSV Scanner Path",

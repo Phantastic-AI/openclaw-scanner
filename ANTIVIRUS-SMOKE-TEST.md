@@ -5,20 +5,20 @@ Canonical spec: [OPENCLAW-SCANNER-SPEC.md](./OPENCLAW-SCANNER-SPEC.md)
 
 This protocol verifies the exec-capable canary path on a real pod host:
 
-- broker-backed ClamAV download scanning
-- broker-backed ClamAV package-install scanning
-- broker-backed OSV package SCA
-- optional broker-required fail-closed behavior
+- scan-daemon-backed ClamAV download scanning
+- scan-daemon-backed ClamAV package-install scanning
+- scan-daemon-backed OSV package SCA
+- optional scan-daemon-required fail-closed behavior
 
 It uses a coding-profile canary because messaging-profile pods do not expose `exec`.
 
 ## What this smoke proves
 
 - file-producing shell actions are detected by OCS
-- `openclaw-sec` is the transport for scan-backed exec actions
+- `openclaw-scand` is the transport for scan-backed exec actions
 - OCS records `clean` with `protection=triggered` when `clamd` is reachable
 - OCS records `advisory` for a known vulnerable npm dependency through OSV
-- broker-required mode can stop the real package-install side effect even if the assistant reply is misleading
+- scan-daemon-required mode can stop the real package-install side effect even if the assistant reply is misleading
 
 ## What this smoke does not prove
 
@@ -46,33 +46,33 @@ Recommended canary state:
 From the ops repo on the controller host:
 
 ```bash
-SMOKE_INCLUDE_BROKER_FAILCLOSED=1 ./smoke/smoke_remote_scanner.sh 51.210.13.102 qa-062
+SMOKE_INCLUDE_SCAN_DAEMON_FAILCLOSED=1 ./smoke/smoke_remote_scanner.sh 51.210.13.102 qa-062
 ```
 
 Expected evidence:
 
 - `posture-report` shows `degraded_exec_posture`
-- the download session writes `broker-download/example.html`
+- the download session writes `scand-download/example.html`
 - `~/.openclaw-avsmoke/plugins/openclaw-scanner/antivirus-status.json` reports:
   - `status: "active"`
   - `protection: "triggered"`
-  - `transport: "openclaw-sec"`
+  - `transport: "openclaw-scand"`
 - `~/.openclaw-avsmoke/plugins/openclaw-scanner/antivirus-ledger.json` contains a download record with:
   - `verdict: "clean"`
   - `protection: "triggered"`
-  - `transport: "openclaw-sec"`
-- the package-install session writes `broker-npm/package-lock.json`
+  - `transport: "openclaw-scand"`
+- the package-install session writes `scand-npm/package-lock.json`
 - `~/.openclaw-avsmoke/plugins/openclaw-scanner/antivirus-ledger.json` contains a package-install record with:
   - `verdict: "clean"`
-  - `transport: "openclaw-sec"`
+  - `transport: "openclaw-scand"`
 - `~/.openclaw-avsmoke/plugins/openclaw-scanner/sca-ledger.json` contains a package-install record with:
   - `verdict: "advisory"`
-  - `transport: "openclaw-sec"`
+  - `transport: "openclaw-scand"`
   - advisory ids `GHSA-vh95-rmgr-6w4m` and `GHSA-xvch-5gv4-984h`
-- `/var/log/openclaw-sec/scans.jsonl` contains one `malware_scan` record and one `package_sca` record for the package-install session
-- with `SMOKE_INCLUDE_BROKER_FAILCLOSED=1`, the negative phase passes only if:
+- `/var/log/openclaw-scand/scans.jsonl` contains one `malware_scan` record and one `package_sca` record for the package-install session
+- with `SMOKE_INCLUDE_SCAN_DAEMON_FAILCLOSED=1`, the negative phase passes only if:
   - the workspace check prints `MISSING`
-  - the broker log does not get a new record for the blocked action
+  - the scan-daemon log does not get a new record for the blocked action
 
 ## Reporting Commands
 
@@ -107,9 +107,9 @@ Verified on `51.210.13.102` on March 25, 2026 UTC:
 
 - the smoke used an isolated coding-profile canary gateway under `~/.openclaw-avsmoke`
 - canary CLI needed `OPENCLAW_GATEWAY_PORT=19011`; without it, the CLI drifted back to the main `18789` gateway
-- broker-backed download recorded antivirus `clean`
-- broker-backed `npm install minimist@0.0.8 --ignore-scripts` recorded antivirus `clean` and SCA `advisory`
-- broker-required negative check left the workspace path absent even though the assistant reply still guessed the package name
+- scan-daemon-backed download recorded antivirus `clean`
+- scan-daemon-backed `npm install minimist@0.0.8 --ignore-scripts` recorded antivirus `clean` and SCA `advisory`
+- scan-daemon-required negative check left the workspace path absent even though the assistant reply still guessed the package name
 
 Verified on Vince pod `51.210.14.27` on March 22, 2026 UTC with OpenClaw `2026.3.14`:
 

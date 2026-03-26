@@ -9,7 +9,7 @@ OpenClaw-native scanner plugin for:
 - **Egress Guard**: block obviously unsafe tool actions before they run
 - **Antivirus Integration**: [ClamAV](https://www.clamav.net/)-backed file scanning for package installs, downloads, and archive extraction
 - **Package SCA**: [OSV-Scanner](https://google.github.io/osv-scanner/) checks package installs for known vulnerable dependencies
-- **Scan Broker**: optional `openclaw-sec` separate-UID boundary for ClamAV and OSV execution
+- **Scan Daemon**: optional `openclaw-scand` separate-UID scan daemon for ClamAV and OSV execution
 - **Exec Posture Warning**: loud degraded-posture reporting when exec-capable tools are enabled
 
 Install from npm through OpenClaw:
@@ -102,8 +102,8 @@ Canonical design docs:
 
 - [OPENCLAW-SCANNER-SPEC.md](./OPENCLAW-SCANNER-SPEC.md)
 - [OPENCLAW-SCANNER-TEST-PLAN.md](./OPENCLAW-SCANNER-TEST-PLAN.md)
-- [OPENCLAW-SEC-BROKER-SPEC.md](./OPENCLAW-SEC-BROKER-SPEC.md)
-- [OPENCLAW-SEC-BROKER-PLAN.md](./OPENCLAW-SEC-BROKER-PLAN.md)
+- [OPENCLAW-SCAND-SPEC.md](./OPENCLAW-SCAND-SPEC.md)
+- [OPENCLAW-SCAND-PLAN.md](./OPENCLAW-SCAND-PLAN.md)
 
 PromptScanner is optional. The default path is gateway-backed review using the models already configured on the OpenClaw install.
 Gateway review now prefers an internal subagent transport and only falls back to gateway HTTP review when loopback + token auth + explicit review endpoints are safely configured.
@@ -119,7 +119,7 @@ What it does now:
 4. blocks high-impact actions with an approval-required reason and stores one pending approval per exact action
 5. stubs untrusted tool results in `tool_result_persist` so raw content is not persisted to the model-visible transcript
 6. prefetches ingress review in `after_tool_call`
-7. runs ClamAV file scanning and OSV package scanning after package-producing actions, directly or through `openclaw-sec` when configured
+7. runs ClamAV file scanning and OSV package scanning after package-producing actions, directly or through `openclaw-scand` when configured
 8. resolves pending tool-result stubs in `before_prompt_build` to:
    - raw content for `allow`
    - wrapped untrusted content for `warn`
@@ -134,7 +134,7 @@ Important current constraint:
 - the interactive approval loop now happens on the next turn: the plugin reviews the user's latest reply with `approvalIntentModel` and allows the exact pending action once if the user clearly approved it
 - if exec-capable tools are exposed, OCS reports `degraded_exec_posture`; ingress and egress still work, but same-UID self-tamper resistance is no longer a credible claim
 - live messaging-pod smoke is documented in [SMOKE-TEST.md](./SMOKE-TEST.md)
-- exec-capable canary smoke for broker-backed download and package-install coverage is documented in [ANTIVIRUS-SMOKE-TEST.md](./ANTIVIRUS-SMOKE-TEST.md)
+- exec-capable canary smoke for scan-daemon-backed download and package-install coverage is documented in [ANTIVIRUS-SMOKE-TEST.md](./ANTIVIRUS-SMOKE-TEST.md)
 - routine `git push` is allowed; `git push --force`, `git push -f`, and `git push --force-with-lease` require approval
 
 ## Backends
@@ -387,34 +387,36 @@ openclaw ocs posture-report
 openclaw ocs posture-report --json
 ```
 
-## Scan Broker (`openclaw-sec`)
+## Scan Daemon (`openclaw-scand`)
 
-OCS can optionally hand malware scanning and package SCA to a separate-UID local broker:
+OCS can optionally hand malware scanning and package SCA to a separate-UID local scan daemon:
 
 - `scanBrokerMode = auto | required | disabled`
-- `scanBrokerSocketPath = /run/openclaw-sec/ocs.sock`
+- `scanBrokerSocketPath = /run/openclaw-scand/ocs.sock`
 
 Mode behavior:
 
 - `disabled`: use direct local scanner execution only
-- `auto`: prefer the broker, then fall back to direct local scanning with a degraded warning
-- `required`: covered scan actions fail closed if the broker is unavailable
+- `auto`: prefer the scan daemon, then fall back to direct local scanning with a degraded warning
+- `required`: covered scan actions fail closed if the scan daemon is unavailable
 
-The broker improves scanner isolation. It does not move approval ownership out of `openclaw`.
+The scan daemon improves scanner isolation. It does not move approval ownership out of `openclaw`.
 
-The `openclaw-sec` helper binary is packaged with the npm release for ops and deployment flows. A normal `openclaw plugins install openclaw-scanner` install does not require operators to run it directly.
+The `openclaw-scand` helper binary is packaged with the npm release for ops and deployment flows. A normal `openclaw plugins install openclaw-scanner` install does not require operators to run it directly.
+
+The public config keys still use `scanBrokerMode` and `scanBrokerSocketPath` for compatibility. The component itself is the `openclaw-scand` scan daemon.
 
 ## Hardening Order
 
 The current hardening stages are:
 
 - base OCS inside the OpenClaw hook boundary
-- optional `openclaw-sec` scan broker for a separate-UID scan boundary
+- optional `openclaw-scand` scan daemon for a separate-UID scan boundary
 
-- [OPENCLAW-SEC-BROKER-SPEC.md](./OPENCLAW-SEC-BROKER-SPEC.md)
-- [OPENCLAW-SEC-BROKER-PLAN.md](./OPENCLAW-SEC-BROKER-PLAN.md)
+- [OPENCLAW-SCAND-SPEC.md](./OPENCLAW-SCAND-SPEC.md)
+- [OPENCLAW-SCAND-PLAN.md](./OPENCLAW-SCAND-PLAN.md)
 
-The next slice after the broker is a separate-UID approval control plane so approval state stops being `openclaw`-owned JSON.
+The next slice after the scan daemon is a separate-UID approval control plane so approval state stops being `openclaw`-owned JSON.
 
 ## RFC: Artifact Taint And Script Recheck
 
@@ -437,7 +439,7 @@ Why:
 Proposed storage model:
 
 - session taint stays in OCS memory
-- artifact taint moves toward a broker-owned ledger under `openclaw-sec`
+- artifact taint moves toward a daemon-owned ledger under `openclaw-scand`
 - xattrs, fanotify, IMA, fs-verity, or LSM labels are useful helpers later, but not the source of truth by themselves
 
 Proposed future exec-time behavior:
@@ -501,11 +503,11 @@ Run:
 npm test
 ```
 
-Live pod messaging and broker smoke are documented in [SMOKE-TEST.md](./SMOKE-TEST.md).
+Live pod messaging and scan-daemon smoke are documented in [SMOKE-TEST.md](./SMOKE-TEST.md).
 
 Exec-capable canary scan smoke is documented in [ANTIVIRUS-SMOKE-TEST.md](./ANTIVIRUS-SMOKE-TEST.md).
 
 Important live QA note:
 
-- broker-required fail-closed can block the real exec/package-install side effect while the assistant still guesses a package name from the user request
-- for that phase, use workspace mutation, antivirus/SCA ledgers, and broker logs as the source of truth
+- scan-daemon-required fail-closed can block the real exec/package-install side effect while the assistant still guesses a package name from the user request
+- for that phase, use workspace mutation, antivirus/SCA ledgers, and daemon logs as the source of truth
