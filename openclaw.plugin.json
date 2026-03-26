@@ -2,7 +2,7 @@
   "id": "openclaw-scanner",
   "name": "OpenClaw Scanner",
   "description": "OpenClaw Scanner for ingress review and egress blocking.",
-  "version": "0.4.1",
+  "version": "0.6.3",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -156,6 +156,43 @@
       "antivirusScanTimeoutMs": {
         "type": "integer",
         "minimum": 1
+      },
+      "scaMode": {
+        "type": "string",
+        "enum": [
+          "auto",
+          "disabled",
+          "required"
+        ]
+      },
+      "scanBrokerMode": {
+        "type": "string",
+        "enum": [
+          "auto",
+          "disabled",
+          "required"
+        ]
+      },
+      "scanBrokerSocketPath": {
+        "type": "string",
+        "minLength": 1
+      },
+      "scaWarnUnavailable": {
+        "type": "boolean"
+      },
+      "scaWarnDetected": {
+        "type": "boolean"
+      },
+      "scaWarnInconclusive": {
+        "type": "boolean"
+      },
+      "osvScannerPath": {
+        "type": "string",
+        "minLength": 1
+      },
+      "scaScanTimeoutMs": {
+        "type": "integer",
+        "minimum": 1
       }
     }
   },
@@ -205,6 +242,26 @@
       "label": "Gateway Review Transport",
       "advanced": true,
       "placeholder": "auto"
+    },
+    "scaMode": {
+      "label": "SCA Mode",
+      "advanced": true,
+      "placeholder": "auto"
+    },
+    "scanBrokerMode": {
+      "label": "Scan Broker Mode",
+      "advanced": true,
+      "placeholder": "auto"
+    },
+    "scanBrokerSocketPath": {
+      "label": "Scan Broker Socket Path",
+      "advanced": true,
+      "placeholder": "/run/openclaw-sec/ocs.sock"
+    },
+    "osvScannerPath": {
+      "label": "OSV Scanner Path",
+      "advanced": true,
+      "placeholder": "osv-scanner"
     },
     "trustModel": {
       "label": "Trust Review Model",

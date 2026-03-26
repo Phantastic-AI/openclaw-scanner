@@ -1,76 +1,119 @@
 # OpenClaw Scanner (OCS) Smoke Test
 
-Last updated: 2026-03-17
+Last updated: 2026-03-25
 Canonical spec: [OPENCLAW-SCANNER-SPEC.md](./OPENCLAW-SCANNER-SPEC.md)
 
-This plugin now has a repeatable pod smoke path for the live `dev-security` messaging-profile pods.
+This plugin has one repeatable pod smoke path with two phases:
 
-For the ClamAV / file-scan canary on coding-profile pod hosts, use [ANTIVIRUS-SMOKE-TEST.md](./ANTIVIRUS-SMOKE-TEST.md).
+- the live `messaging` gateway for `allow / ask / approve / deny`
+- the coding-profile canary gateway for broker-backed download and package-install scans
+
+For the lower-level scan-only canary notes, use [ANTIVIRUS-SMOKE-TEST.md](./ANTIVIRUS-SMOKE-TEST.md).
 
 ## What this smoke covers
+
+Main messaging gateway:
 
 - `allow`: a benign local tool call should pass
 - `ask`: a high-impact outbound action should block and request approval
 - `allow once`: the exact pending action should be allowed once after a natural-language approval reply
 - `deny`: a natural-language refusal should keep the action from being retried
 
-## What this smoke does not cover on messaging-profile pods
+Exec-capable canary gateway:
 
-- deterministic hard shell blocks like `rm -rf`
+- `posture-report`: exec-capable profile must report `degraded_exec_posture`
+- `download`: broker-backed ClamAV path should record `clean`
+- `package install`: broker-backed ClamAV path should record `clean`
+- `package install`: broker-backed OSV path should record `advisory` for `minimist@0.0.8`
+- optional `fail closed`: stopping `openclaw-sec` must stop the actual package install from mutating the workspace
+
+## What this smoke does not prove
+
+- hard shell-block coverage like `rm -rf`
 - browser or web ingress
-- sandboxed exec
-
-Those require a coding-profile pod with `exec` or web tools enabled.
+- sandboxed exec attestation
+- perfect user-facing wording for blocked exec-package actions when the broker is down
 
 ## One-command smoke
 
 ```bash
-./scripts/smoke_remote_scanner.sh 51.210.13.102
+./smoke/smoke_remote_scanner.sh 51.210.13.102
 ```
 
 Optional session prefix:
 
 ```bash
-./scripts/smoke_remote_scanner.sh 51.210.13.102 my-smoke
+./smoke/smoke_remote_scanner.sh 51.210.13.102 my-smoke
+```
+
+Include the negative broker-required check:
+
+```bash
+SMOKE_INCLUDE_BROKER_FAILCLOSED=1 ./smoke/smoke_remote_scanner.sh 51.210.13.102 my-smoke
 ```
 
 ## How to read the results
 
 - `allow` should return a normal assistant answer after using `sessions_list`.
 - `ask` should show the `sessions_send` attempt blocked for approval.
-- `allow once` may still end with a downstream `sessions.visibility=tree` error on this pod. That is acceptable for this smoke. The important evidence is:
+- `allow once` passes when:
+  - the assistant says the send was delivered
   - the security log contains `approval_granted`
   - the security log contains `egress_allow_approved`
-  - the transcript shows the tool actually executed after approval
-- `deny` should end with a refusal like `I won't send it` and no follow-up tool execution.
-- CLI `gateway call agent --expect-final` timeouts are not fatal for this smoke. Use the emitted transcript tails and the security log tail as the source of truth.
+  - the ask-session transcript shows the second `sessions_send` call accepted
+- `deny` passes when:
+  - the assistant refuses to retry
+  - the deny approval-store entry is `state: "denied"`
+- the canary `posture-report` must show `degraded_exec_posture`
+- the canary `antivirus-report` must show `transport: "openclaw-sec"` and `verdict: "clean"` for the download and package-install sessions
+- the canary `sca-report` must show `transport: "openclaw-sec"` and `verdict: "advisory"` for the `minimist@0.0.8` package-install session
+- the optional broker-required negative check passes only if the workspace check prints `MISSING`
+
+Important caveat:
+
+- on current OpenClaw builds, the negative exec-package phase can still end with the assistant guessing the package name even when OCS blocked the real tool result
+- for that phase, the source of truth is:
+  - workspace path remains absent
+  - antivirus/SCA ledgers record `unavailable`
+  - no new broker log record appears for the blocked action
 
 ## Live evidence notes for this pod
 
-The `dev-security` pod currently uses the `messaging` tool profile. The strongest live allow-once proof is a `sessions_send` request to `agent:main:main`:
+The `dev-security` pod currently uses:
+
+- a live `messaging` gateway on `~/.openclaw`
+- a coding-profile canary on `~/.openclaw-avsmoke` at `19011`
+
+The strongest main-gateway approval proof is a `sessions_send` request to the same session:
 
 - OpenClaw Scanner blocks it first as `ask`
 - a natural-language `Yes, send it now.` grants the exact pending action once
 - the tool then runs successfully on the same session via `sessions_send ... timeoutSeconds 0`
 - the live transcript shows the accepted send result and the echoed inbound inter-session message
 
-Concrete verified live prefixes on `51.210.13.102`:
+Concrete verified live prefix on `51.210.13.102` on March 25, 2026 UTC:
 
-- `codex-repeatable-smoke-4`
-- `codex-repeatable-smoke-5`
+- `qa-062`
 
-For those prefixes, the reliable approval proof is:
+For `qa-062`, the smoke proved:
 
-- transcript shows first `sessions_send` blocked
-- transcript shows user reply `Yes, send it now.`
-- security log shows `approval_granted`
-- security log shows `egress_allow_approved`
-- transcript shows second `sessions_send` accepted
+- main gateway `allow` passed
+- main gateway natural-language `ask -> approve -> send once` passed
+- main gateway natural-language `deny` passed and left a denied approval-store entry
+- canary `posture-report` showed `degraded_exec_posture`
+- canary download recorded broker-backed antivirus `clean`
+- canary package install recorded broker-backed antivirus `clean`
+- canary package install recorded broker-backed OSV `advisory`
+- broker-required negative check left the workspace path absent even though the assistant reply still guessed the package name
 
 ## Troubleshooting
 
-- If `gateway call ...` returns websocket `1006`, the gateway usually was not fully ready yet after restart. Rerun after `gateway call status --json` succeeds.
+- The smoke harness sets `OPENCLAW_GATEWAY_PORT=19011` for the canary. Do not drop that env or the CLI may drift back to the main `18789` gateway.
+- If `gateway call ...` returns websocket `1006`, the gateway usually was not fully ready yet after restart. Rerun after `gateway call status --timeout 30000 --json` succeeds.
 - If approval review fails with `401 Unauthorized`, check whether the systemd env token and `openclaw.json` token differ. The plugin now prefers the configured gateway auth token for local HTTP review and logs a mismatch warning.
-- The current pod has broken Mattermost auth. `message` tool behavior is noisy here. Prefer `sessions_send` for repeatable smoke tests on this stack.
-- `allow once` can still print a CLI timeout from `gateway call agent --expect-final` even when the approved send succeeded. Treat the transcript tail and security log as source of truth.
-- On current messaging pods, a natural-language denial usually works because the model chooses not to retry after `No, do not send it.` The plugin-owned denied state is still only guaranteed if the exact blocked action is attempted again later.
+- The current pod has broken Mattermost auth. `message` tool behavior is noisy here. Prefer `sessions_send` for repeatable messaging smoke on this stack.
+- `openclaw gateway restart` from an arbitrary SSH shell is not authoritative on this host. For the main gateway, restart the real user service with `sudo -u openclaw XDG_RUNTIME_DIR=/run/user/999 systemctl --user restart openclaw-gateway.service`.
+- The canary is a separate background process, not the main user systemd unit. If you cycle it manually, preserve:
+  - `OPENCLAW_STATE_DIR=/home/openclaw/.openclaw-avsmoke`
+  - `OPENCLAW_CONFIG_PATH=/home/openclaw/.openclaw-avsmoke/openclaw.json`
+  - `OPENCLAW_GATEWAY_PORT=19011`

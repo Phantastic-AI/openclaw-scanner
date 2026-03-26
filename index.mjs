@@ -12,6 +12,11 @@ import {
   runTriggeredClamdScan,
 } from "./lib/antivirus.mjs";
 import {
+  evaluateExecPosture,
+  EXEC_POSTURE_DEGRADED,
+  mergeObservedExecPosture,
+} from "./lib/posture.mjs";
+import {
   buildApprovalIntentReview,
   buildApprovalGrantConfirmationReview,
   buildEgressReview,
@@ -27,12 +32,31 @@ import {
 import { buildArgsHash, evaluateDeterministicEgress, mergeTaintLevels } from "./lib/policy.mjs";
 import { reviewIngressWithPromptScanner } from "./lib/promptscanner-client.mjs";
 import {
+  buildScaNotice,
+  detectScaBackend,
+  normalizeScaConfig,
+  runOsvSourceScan,
+  SCA_INLINE_ADVISORY_MESSAGE,
+  SCA_INLINE_INCONCLUSIVE_MESSAGE,
+  SCA_INLINE_UNAVAILABLE_MESSAGE,
+  shouldRunScaForAction,
+} from "./lib/sca.mjs";
+import {
   buildToolSignature,
   extractAssistantToolCalls,
   extractToolResultText,
   hashText,
   sanitizeCallerId,
 } from "./lib/text.mjs";
+import {
+  buildRequiredBrokerBlockReason,
+  buildScanBrokerRequest,
+  getScanBrokerStatus,
+  normalizeScanBrokerConfig,
+  requestScanBroker,
+  scanBrokerEnabled,
+  scanBrokerRequired,
+} from "./lib/scan-broker.mjs";
 import {
   REVIEW_LEDGER_CLI_COMMAND,
   REVIEW_LEDGER_PLUGIN_ID,
@@ -190,6 +214,9 @@ function normalizeConfig(rawConfig, fullConfig) {
     persistMode: String(raw.persistMode || "stub").trim().toLowerCase(),
     headlessAskPolicy: String(raw.headlessAskPolicy || "block").trim().toLowerCase(),
     antivirus: normalizeAntivirusConfig(raw),
+    sca: normalizeScaConfig(raw),
+    scanBroker: normalizeScanBrokerConfig(raw),
+    execPosture: evaluateExecPosture(fullConfig),
   };
 }
 
@@ -381,6 +408,27 @@ function applyAntivirusReplyRequirement(message, notices = []) {
   return setMessageLeadingText(message, nextText);
 }
 
+function buildBlockedExecutionReply(blockReason) {
+  const base = String(blockReason || "").trim() ||
+    `${REVIEW_LEDGER_PLUGIN_NAME} blocked the requested action before execution.`;
+  const normalized = /\s*[.?!]\s*$/.test(base) ? base : `${base}.`;
+  if (/The tool did not run and no side effects occurred\.\s*$/i.test(normalized)) {
+    return normalized;
+  }
+  return `${normalized} The tool did not run and no side effects occurred.`;
+}
+
+function applyBlockedExecutionReply(message, replyRequirement) {
+  if (!isUserFacingAssistantMessage(message)) {
+    return message;
+  }
+  const text = String(replyRequirement?.message || "").trim();
+  if (!text) {
+    return message;
+  }
+  return setMessageLeadingText(message, text);
+}
+
 function buildWarnedToolResultMessage(entry, review) {
   const wrappedText =
     "[BEGIN UNTRUSTED TOOL CONTENT]\n" +
@@ -486,6 +534,21 @@ function buildIngressReviewLedgerKey(entry) {
 function buildAntivirusLedgerKey(entry) {
   return [
     "antivirus",
+    hashText(
+      [
+        entry?.sessionKey || "unknown-session",
+        entry?.toolCallId || "unknown-tool-call",
+        entry?.verdict || "unknown-verdict",
+        entry?.actionKind || "unknown-action",
+        String(entry?.recordedAt || Date.now()),
+      ].join(":"),
+    ),
+  ].join(":");
+}
+
+function buildScaLedgerKey(entry) {
+  return [
+    "sca",
     hashText(
       [
         entry?.sessionKey || "unknown-session",
@@ -687,6 +750,48 @@ function normalizeApprovalIntentText(text) {
   return blocks[blocks.length - 1];
 }
 
+function scoreApprovalIntentCandidate(text, previousAssistantText = "") {
+  const normalized = normalizeApprovalIntentText(text) || String(text || "").trim();
+  if (!normalized) {
+    return Number.NEGATIVE_INFINITY;
+  }
+  let score = 0;
+  if (hasExplicitRefusalIntent(normalized)) {
+    score += 100;
+  }
+  if (hasExplicitApprovalIntent(normalized)) {
+    score += 40;
+  }
+  if (isApprovalResponseContext(normalized, previousAssistantText)) {
+    score += 50;
+  }
+  if (looksLikeFreshToolInstruction(normalized)) {
+    score -= 100;
+  }
+  return score;
+}
+
+function selectApprovalIntentCandidate(candidates = []) {
+  let best;
+  for (const candidate of candidates) {
+    const text = String(candidate?.text || "").trim();
+    if (!text) {
+      continue;
+    }
+    const previousAssistantText = String(candidate?.previousAssistantText || "").trim();
+    const scored = {
+      ...candidate,
+      text,
+      previousAssistantText,
+      score: scoreApprovalIntentCandidate(text, previousAssistantText),
+    };
+    if (!best || scored.score > best.score) {
+      best = scored;
+    }
+  }
+  return best;
+}
+
 function hasExplicitRefusalIntent(text) {
   const normalized = String(text || "").trim().toLowerCase();
   if (!normalized) {
@@ -706,6 +811,48 @@ function hasExplicitRefusalIntent(text) {
     /\bnot now\b/,
     /\bi will not approve\b/,
     /\bi won't approve\b/,
+  ].some((pattern) => pattern.test(normalized));
+}
+
+function hasExplicitApprovalIntent(text) {
+  const normalized = String(text || "").trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  if (hasExplicitRefusalIntent(normalized)) {
+    return false;
+  }
+  if (/^(?:\[[^\]]+\]\s*)?yes(?:\b|[,.!])/.test(normalized)) {
+    return true;
+  }
+  return [
+    /\bapprove\b/,
+    /\bapproved\b/,
+    /\bgo ahead\b/,
+    /\bproceed\b/,
+    /\bdo it\b/,
+    /\bplease send\b/,
+    /\bsend it now\b/,
+    /\byou can send\b/,
+    /\ballow it\b/,
+  ].some((pattern) => pattern.test(normalized));
+}
+
+function looksLikeFreshToolInstruction(text) {
+  const normalized = String(text || "").trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  return [
+    /\buse the\b/,
+    /\brun the\b/,
+    /\bexecute\b/,
+    /\bcall the\b/,
+    /\btool\b/,
+    /\btimeoutseconds\b/,
+    /\bsessions?_send\b/,
+    /\bexact text\b/,
+    /\bsession key\b/,
   ].some((pattern) => pattern.test(normalized));
 }
 
@@ -879,6 +1026,21 @@ const plugin = {
       0,
       api.logger,
     );
+    const scaLedger = new PersistentJsonCache(
+      path.join(stateDir, "sca-ledger.json"),
+      0,
+      api.logger,
+    );
+    const scaStatusStore = new PersistentJsonCache(
+      path.join(stateDir, "sca-status.json"),
+      0,
+      api.logger,
+    );
+    const postureStatusStore = new PersistentJsonCache(
+      path.join(stateDir, "posture-status.json"),
+      0,
+      api.logger,
+    );
     const approvalStore = new PersistentJsonCache(
       path.join(stateDir, "approval-store.json"),
       config.approvalTtlSec,
@@ -891,8 +1053,15 @@ const plugin = {
         reviewLedger.init(),
         antivirusLedger.init(),
         antivirusStatusStore.init(),
+        scaLedger.init(),
+        scaStatusStore.init(),
+        postureStatusStore.init(),
         approvalStore.init(),
       ]);
+      await postureStatusStore.set("current", {
+        ...config.execPosture,
+        updatedAt: Date.now(),
+      });
       const storedApprovals = await approvalStore.values();
       for (const entry of storedApprovals) {
         if (!entry?.approvalId || !entry?.sessionKey || !entry?.toolName || !entry?.argsHash) {
@@ -913,6 +1082,8 @@ const plugin = {
     const pendingAntivirusPlans = new Map();
     const antivirusWarningsByToolCall = new Map();
     const antivirusReplyRequirementsBySession = new Map();
+    const blockedExecutionRepliesBySession = new Map();
+    const scaWarningsByToolCall = new Map();
 
     function rememberPending(entry) {
       pendingEntries.set(entry.pendingKey, entry);
@@ -935,6 +1106,7 @@ const plugin = {
       sessionTaints.delete(sessionKey);
       internalReviewSessions.delete(sessionKey);
       antivirusReplyRequirementsBySession.delete(sessionKey);
+      blockedExecutionRepliesBySession.delete(sessionKey);
       const approvalIds = approvalsBySession.get(sessionKey);
       if (approvalIds) {
         for (const approvalId of approvalIds) {
@@ -1208,6 +1380,31 @@ const plugin = {
       rememberAntivirusReplyRequirement(sessionKey, [notice]);
     }
 
+    function rememberBlockedExecutionReply(sessionKey, blockReason) {
+      if (!sessionKey || !blockReason) {
+        return;
+      }
+      blockedExecutionRepliesBySession.set(sessionKey, {
+        message: buildBlockedExecutionReply(blockReason),
+        blockReason: String(blockReason).trim(),
+        recordedAt: Date.now(),
+      });
+    }
+
+    function getBlockedExecutionReply(sessionKey) {
+      if (!sessionKey) {
+        return undefined;
+      }
+      return blockedExecutionRepliesBySession.get(sessionKey);
+    }
+
+    function clearBlockedExecutionReply(sessionKey) {
+      if (!sessionKey) {
+        return;
+      }
+      blockedExecutionRepliesBySession.delete(sessionKey);
+    }
+
     async function persistAntivirusStatus(status) {
       await antivirusStatusStore.set("current", {
         ...status,
@@ -1220,13 +1417,411 @@ const plugin = {
       return entry;
     }
 
+    async function persistScaStatus(status) {
+      await scaStatusStore.set("current", {
+        ...status,
+        updatedAt: Date.now(),
+      });
+    }
+
+    async function recordScaEvent(entry) {
+      await scaLedger.set(buildScaLedgerKey(entry), entry);
+      return entry;
+    }
+
+    async function persistPostureStatus(status) {
+      await postureStatusStore.set("current", {
+        ...status,
+        updatedAt: Date.now(),
+      });
+    }
+
+    async function degradeExecPosture(observation = {}) {
+      const current =
+        (await postureStatusStore.get("current")) || {
+          ...config.execPosture,
+          updatedAt: Date.now(),
+        };
+      const next = mergeObservedExecPosture(current, observation);
+      await persistPostureStatus(next);
+      return next;
+    }
+
+    function rememberScaToolWarning(toolCallId, message) {
+      if (!toolCallId || !message) {
+        return;
+      }
+      scaWarningsByToolCall.set(toolCallId, message);
+      for (const entry of pendingEntries.values()) {
+        if (entry?.toolCallId === toolCallId) {
+          entry.scaWarning = message;
+        }
+      }
+    }
+
+    function takeScaToolWarning(toolCallId) {
+      if (!toolCallId) {
+        return undefined;
+      }
+      const message = scaWarningsByToolCall.get(toolCallId);
+      scaWarningsByToolCall.delete(toolCallId);
+      return message;
+    }
+
+    function rememberScaReplyNotice(sessionKey, outcome) {
+      const notice = buildScaNotice(config.sca, outcome);
+      if (!notice) {
+        return;
+      }
+      rememberAntivirusReplyRequirement(sessionKey, [notice]);
+    }
+
+    function resolveScanBrokerTimeout(...values) {
+      const numeric = values
+        .map((value) =>
+          Number.isFinite(value) && Number(value) > 0 ? Math.trunc(Number(value)) : 0,
+        )
+        .filter((value) => value > 0);
+      return Math.max(config.scanBroker.timeoutMs || 0, ...numeric);
+    }
+
+    function normalizeBrokerStatus(status = {}, extra = {}) {
+      return {
+        ...status,
+        ...extra,
+        transport: "openclaw-sec",
+        broker: "openclaw-sec",
+        socketPath: config.scanBroker.socketPath,
+      };
+    }
+
+    function buildBrokerRequestForAction(op, action, ctx = {}, event = {}) {
+      return buildScanBrokerRequest({
+        op,
+        sessionKey: ctx.sessionKey || action?.sessionKey || "unknown",
+        toolCallId: event.toolCallId || action?.toolCallId || undefined,
+        actionKind: action?.kind || op,
+        roots: action?.roots || [],
+      });
+    }
+
+    async function requestBrokerStatus(action) {
+      const response = await getScanBrokerStatus(config.scanBroker, {
+        timeoutMs: resolveScanBrokerTimeout(
+          config.antivirus.scanTimeoutMs,
+          config.sca.scanTimeoutMs,
+        ),
+        metadata: action
+          ? {
+              actionKind: action.kind,
+              roots: action.roots || [],
+            }
+          : undefined,
+      });
+      if (!response.ok) {
+        throw new Error(response.message || response.reasonCode || "scan broker status failed");
+      }
+      return response;
+    }
+
+    function logScanBrokerFallback(action, operation, error) {
+      logSecurity(api, "scan_broker_fallback", {
+        operation,
+        actionKind: action?.kind || "unknown",
+        socketPath: config.scanBroker.socketPath,
+        error: String(error),
+      });
+    }
+
+    async function ensureRequiredScanBrokerAvailability(action) {
+      if (!action || !scanBrokerRequired(config.scanBroker)) {
+        return undefined;
+      }
+      try {
+        await requestBrokerStatus(action);
+        return undefined;
+      } catch {
+        return buildRequiredBrokerBlockReason(action.kind);
+      }
+    }
+
+    async function ensureRequiredScaAvailability(action) {
+      if (!shouldRunScaForAction(action) || config.sca.mode !== "required") {
+        return undefined;
+      }
+      if (scanBrokerEnabled(config.scanBroker)) {
+        try {
+          const brokerStatus = await requestBrokerStatus(action);
+          const packageSca = brokerStatus?.status?.packageSca;
+          if (packageSca && typeof packageSca === "object") {
+            const backend = normalizeBrokerStatus({
+              engine: packageSca.engine || "osv-scanner",
+              status: packageSca.status || "unknown",
+              version: packageSca.version,
+              statusMessage: packageSca.statusMessage,
+              warnUnavailable: config.sca.warnUnavailable,
+            });
+            await persistScaStatus(backend);
+            if (backend.status === "unavailable") {
+              return `${REVIEW_LEDGER_PLUGIN_NAME} blocked this package-install action because OSV-Scanner is required but unavailable.`;
+            }
+            return undefined;
+          }
+          if (scanBrokerRequired(config.scanBroker)) {
+            return buildRequiredBrokerBlockReason(action.kind);
+          }
+        } catch (error) {
+          if (scanBrokerRequired(config.scanBroker)) {
+            return buildRequiredBrokerBlockReason(action.kind);
+          }
+          logScanBrokerFallback(action, "status", error);
+        }
+      }
+      const backend = await detectScaBackend(config.sca);
+      await persistScaStatus(backend);
+      if (backend.status === "unavailable") {
+        return `${REVIEW_LEDGER_PLUGIN_NAME} blocked this package-install action because OSV-Scanner is required but unavailable.`;
+      }
+      return undefined;
+    }
+
+    async function handleScaResult({ event, ctx, action }) {
+      if (!shouldRunScaForAction(action) || config.sca.mode === "disabled") {
+        return;
+      }
+
+      const baseRecord = {
+        recordedAt: Date.now(),
+        sessionKey: ctx.sessionKey || action.sessionKey || "unknown",
+        toolCallId: event.toolCallId || action.toolCallId || null,
+        toolName: event.toolName || "unknown",
+        actionKind: action.kind,
+        commandText: action.commandText,
+        scannedRoots: action.roots || [],
+      };
+
+      if (scanBrokerEnabled(config.scanBroker)) {
+        try {
+          const response = await requestScanBroker(
+            config.scanBroker,
+            buildBrokerRequestForAction("package_sca", action, ctx, event),
+            {
+              timeoutMs: resolveScanBrokerTimeout(config.sca.scanTimeoutMs),
+            },
+          );
+          if (!response.ok) {
+            throw new Error(response.message || response.reasonCode || "broker package_sca failed");
+          }
+
+          const backend = normalizeBrokerStatus({
+            engine: response.engine || response.backend || "osv-scanner",
+            status: response.status || "active",
+            statusMessage: response.statusMessage,
+            warnUnavailable: config.sca.warnUnavailable,
+          });
+          await persistScaStatus(backend);
+
+          const record = {
+            ...baseRecord,
+            engine: backend.engine || "unknown",
+            status: backend.status || "unknown",
+            transport: "openclaw-sec",
+            verdict: response.verdict || "error",
+            scannedRoots: response.scannedRoots || [],
+            advisories: response.advisories || [],
+            errors: response.errors || [],
+            message:
+              response.verdict === "advisory"
+                ? SCA_INLINE_ADVISORY_MESSAGE
+                : response.verdict === "inconclusive"
+                  ? SCA_INLINE_INCONCLUSIVE_MESSAGE
+                  : response.verdict === "unavailable"
+                    ? SCA_INLINE_UNAVAILABLE_MESSAGE
+                    : backend.statusMessage,
+          };
+          await recordScaEvent(record);
+
+          if (record.verdict === "unavailable") {
+            rememberScaToolWarning(record.toolCallId, record.message);
+            logSecurity(api, "sca_unavailable", {
+              toolName: record.toolName,
+              toolCallId: record.toolCallId,
+              actionKind: record.actionKind,
+              scannedRoots: record.scannedRoots,
+              transport: record.transport,
+            });
+            rememberScaReplyNotice(ctx.sessionKey, { verdict: "unavailable", action });
+            return record;
+          }
+
+          if (record.verdict === "advisory") {
+            rememberScaToolWarning(record.toolCallId, record.message);
+            rememberScaReplyNotice(ctx.sessionKey, { verdict: "advisory", action });
+            logSecurity(api, "sca_advisory_detected", {
+              toolName: record.toolName,
+              toolCallId: record.toolCallId,
+              actionKind: record.actionKind,
+              advisories: record.advisories,
+              transport: record.transport,
+            });
+            return record;
+          }
+
+          if (record.verdict === "inconclusive") {
+            rememberScaReplyNotice(ctx.sessionKey, { verdict: "inconclusive", action });
+            logSecurity(api, "sca_inconclusive", {
+              toolName: record.toolName,
+              toolCallId: record.toolCallId,
+              actionKind: record.actionKind,
+              errors: record.errors,
+              transport: record.transport,
+            });
+            return record;
+          }
+
+          if (record.verdict === "error") {
+            rememberScaReplyNotice(ctx.sessionKey, { verdict: "unavailable", action });
+            logSecurity(api, "sca_scan_error", {
+              toolName: record.toolName,
+              toolCallId: record.toolCallId,
+              actionKind: record.actionKind,
+              errors: record.errors,
+              transport: record.transport,
+            });
+            return record;
+          }
+
+          logSecurity(api, "sca_clean", {
+            toolName: record.toolName,
+            toolCallId: record.toolCallId,
+            actionKind: record.actionKind,
+            scannedRoots: record.scannedRoots,
+            transport: record.transport,
+          });
+          return record;
+        } catch (error) {
+          if (scanBrokerRequired(config.scanBroker)) {
+            const backend = normalizeBrokerStatus({
+              engine: "osv-scanner",
+              status: "unavailable",
+              statusMessage: SCA_INLINE_UNAVAILABLE_MESSAGE,
+              warnUnavailable: config.sca.warnUnavailable,
+            });
+            await persistScaStatus(backend);
+            const record = {
+              ...baseRecord,
+              engine: backend.engine,
+              status: backend.status,
+              transport: "openclaw-sec",
+              verdict: "unavailable",
+              advisories: [],
+              errors: [{ detail: String(error) }],
+              message: SCA_INLINE_UNAVAILABLE_MESSAGE,
+            };
+            await recordScaEvent(record);
+            rememberScaToolWarning(record.toolCallId, record.message);
+            logSecurity(api, "sca_unavailable", {
+              toolName: record.toolName,
+              toolCallId: record.toolCallId,
+              actionKind: record.actionKind,
+              errors: record.errors,
+              transport: record.transport,
+            });
+            rememberScaReplyNotice(ctx.sessionKey, { verdict: "unavailable", action });
+            return record;
+          }
+          logScanBrokerFallback(action, "package_sca", error);
+        }
+      }
+
+      const backend = await detectScaBackend(config.sca);
+      await persistScaStatus(backend);
+
+      if (backend.status === "unavailable") {
+        const record = {
+          ...baseRecord,
+          engine: backend.engine || "unknown",
+          status: backend.status || "unknown",
+          verdict: "unavailable",
+          message: SCA_INLINE_UNAVAILABLE_MESSAGE,
+        };
+        await recordScaEvent(record);
+        rememberScaToolWarning(record.toolCallId, record.message);
+        logSecurity(api, "sca_unavailable", {
+          toolName: record.toolName,
+          toolCallId: record.toolCallId,
+          actionKind: record.actionKind,
+          scannedRoots: record.scannedRoots,
+        });
+        rememberScaReplyNotice(ctx.sessionKey, { verdict: "unavailable", action });
+        return record;
+      }
+
+      const scan = await runOsvSourceScan(config.sca, action.roots || []);
+      const record = {
+        ...baseRecord,
+        engine: backend.engine || "unknown",
+        status: backend.status || "unknown",
+        verdict: scan.verdict,
+        scannedRoots: scan.scannedRoots || [],
+        advisories: scan.advisories || [],
+        errors: scan.errors || [],
+        message:
+          scan.verdict === "advisory"
+            ? SCA_INLINE_ADVISORY_MESSAGE
+            : scan.verdict === "inconclusive"
+              ? SCA_INLINE_INCONCLUSIVE_MESSAGE
+              : backend.statusMessage,
+      };
+      await recordScaEvent(record);
+
+      if (scan.verdict === "advisory") {
+        rememberScaToolWarning(record.toolCallId, record.message);
+        rememberScaReplyNotice(ctx.sessionKey, { verdict: "advisory", action });
+        logSecurity(api, "sca_advisory_detected", {
+          toolName: record.toolName,
+          toolCallId: record.toolCallId,
+          actionKind: record.actionKind,
+          advisories: record.advisories,
+        });
+        return record;
+      }
+
+      if (scan.verdict === "inconclusive") {
+        rememberScaReplyNotice(ctx.sessionKey, { verdict: "inconclusive", action });
+        logSecurity(api, "sca_inconclusive", {
+          toolName: record.toolName,
+          toolCallId: record.toolCallId,
+          actionKind: record.actionKind,
+          errors: record.errors,
+        });
+        return record;
+      }
+
+      if (scan.verdict === "error") {
+        rememberScaReplyNotice(ctx.sessionKey, { verdict: "unavailable", action });
+        logSecurity(api, "sca_scan_error", {
+          toolName: record.toolName,
+          toolCallId: record.toolCallId,
+          actionKind: record.actionKind,
+          errors: record.errors,
+        });
+        return record;
+      }
+
+      logSecurity(api, "sca_clean", {
+        toolName: record.toolName,
+        toolCallId: record.toolCallId,
+        actionKind: record.actionKind,
+        scannedRoots: record.scannedRoots,
+      });
+      return record;
+    }
+
     async function handleAntivirusResult({ event, ctx, action }) {
       if (!action || config.antivirus.mode === "disabled") {
         return;
       }
-
-      const backend = await detectAntivirusBackend(config.antivirus, action.roots || []);
-      await persistAntivirusStatus(backend);
 
       const baseRecord = {
         recordedAt: Date.now(),
@@ -1236,13 +1831,156 @@ const plugin = {
         actionKind: action.kind,
         commandText: action.commandText,
         targetPaths: action.roots || [],
-        protection: backend.protection || "unknown",
-        status: backend.status || "unknown",
       };
+
+      if (scanBrokerEnabled(config.scanBroker)) {
+        try {
+          const response = await requestScanBroker(
+            config.scanBroker,
+            buildBrokerRequestForAction("malware_scan", action, ctx, event),
+            {
+              timeoutMs: resolveScanBrokerTimeout(config.antivirus.scanTimeoutMs),
+            },
+          );
+          if (!response.ok) {
+            throw new Error(response.message || response.reasonCode || "broker malware_scan failed");
+          }
+
+          const backend = normalizeBrokerStatus({
+            status: response.status || "unknown",
+            protection: response.protection || "unknown",
+            statusMessage: response.statusMessage,
+            warnUnavailable: config.antivirus.warnUnavailable,
+          });
+          await persistAntivirusStatus(backend);
+
+          const record = {
+            ...baseRecord,
+            protection: backend.protection || "unknown",
+            status: backend.status || "unknown",
+            transport: "openclaw-sec",
+            verdict: response.verdict || "error",
+            onAccessRoots: response.onAccessRoots || [],
+            coveredPaths: response.coveredPaths || [],
+            scannedPaths: response.scannedPaths || [],
+            findings: response.findings || [],
+            errors: response.errors || [],
+            message:
+              response.verdict === "infected"
+                ? ANTIVIRUS_MALWARE_QUARANTINED_MESSAGE
+                : response.verdict === "unavailable"
+                  ? ANTIVIRUS_INLINE_UNAVAILABLE_MESSAGE
+                  : backend.statusMessage,
+          };
+          await recordAntivirusEvent(record);
+
+          if (record.verdict === "unavailable") {
+            rememberAntivirusToolWarning(record.toolCallId, record.message);
+            logSecurity(api, "antivirus_unavailable", {
+              toolName: record.toolName,
+              toolCallId: record.toolCallId,
+              actionKind: record.actionKind,
+              targetPaths: record.targetPaths,
+              transport: record.transport,
+            });
+            if (config.antivirus.warnUnavailable) {
+              rememberAntivirusReplyNotice(ctx.sessionKey, { verdict: "unavailable", action });
+            }
+            return record;
+          }
+
+          if (record.verdict === "covered") {
+            logSecurity(api, "antivirus_on_access_active", {
+              toolName: record.toolName,
+              toolCallId: record.toolCallId,
+              actionKind: record.actionKind,
+              coveredPaths: record.coveredPaths,
+              transport: record.transport,
+            });
+            return record;
+          }
+
+          if (record.verdict === "infected") {
+            logSecurity(api, "antivirus_malware_detected", {
+              toolName: record.toolName,
+              toolCallId: record.toolCallId,
+              actionKind: record.actionKind,
+              findings: record.findings,
+              transport: record.transport,
+            });
+            rememberAntivirusToolWarning(record.toolCallId, record.message);
+            rememberAntivirusReplyNotice(ctx.sessionKey, { verdict: "infected", action });
+            return record;
+          }
+
+          if (record.verdict === "error") {
+            logSecurity(api, "antivirus_scan_error", {
+              toolName: record.toolName,
+              toolCallId: record.toolCallId,
+              actionKind: record.actionKind,
+              errors: record.errors,
+              transport: record.transport,
+            });
+            if (config.antivirus.warnUnavailable) {
+              rememberAntivirusToolWarning(record.toolCallId, ANTIVIRUS_INLINE_UNAVAILABLE_MESSAGE);
+              rememberAntivirusReplyNotice(ctx.sessionKey, { verdict: "unavailable", action });
+            }
+            return record;
+          }
+
+          logSecurity(api, "antivirus_scan_clean", {
+            toolName: record.toolName,
+            toolCallId: record.toolCallId,
+            actionKind: record.actionKind,
+            scannedPaths: record.scannedPaths,
+            transport: record.transport,
+          });
+          return record;
+        } catch (error) {
+          if (scanBrokerRequired(config.scanBroker)) {
+            const backend = normalizeBrokerStatus({
+              status: "unavailable",
+              protection: "unavailable",
+              statusMessage: ANTIVIRUS_INLINE_UNAVAILABLE_MESSAGE,
+              warnUnavailable: config.antivirus.warnUnavailable,
+            });
+            await persistAntivirusStatus(backend);
+            const record = {
+              ...baseRecord,
+              protection: backend.protection,
+              status: backend.status,
+              transport: "openclaw-sec",
+              verdict: "unavailable",
+              findings: [],
+              errors: [{ detail: String(error) }],
+              message: ANTIVIRUS_INLINE_UNAVAILABLE_MESSAGE,
+            };
+            await recordAntivirusEvent(record);
+            rememberAntivirusToolWarning(record.toolCallId, record.message);
+            logSecurity(api, "antivirus_unavailable", {
+              toolName: record.toolName,
+              toolCallId: record.toolCallId,
+              actionKind: record.actionKind,
+              errors: record.errors,
+              transport: record.transport,
+            });
+            if (config.antivirus.warnUnavailable) {
+              rememberAntivirusReplyNotice(ctx.sessionKey, { verdict: "unavailable", action });
+            }
+            return record;
+          }
+          logScanBrokerFallback(action, "malware_scan", error);
+        }
+      }
+
+      const backend = await detectAntivirusBackend(config.antivirus, action.roots || []);
+      await persistAntivirusStatus(backend);
 
       if (backend.status === "unavailable") {
         const record = {
           ...baseRecord,
+          protection: backend.protection || "unknown",
+          status: backend.status || "unknown",
           verdict: "unavailable",
           message: ANTIVIRUS_INLINE_UNAVAILABLE_MESSAGE,
         };
@@ -1263,6 +2001,8 @@ const plugin = {
       if (backend.protection === "on-access") {
         const record = {
           ...baseRecord,
+          protection: backend.protection || "unknown",
+          status: backend.status || "unknown",
           verdict: "covered",
           message: backend.statusMessage,
           onAccessRoots: backend.onAccessRoots || [],
@@ -1288,6 +2028,8 @@ const plugin = {
 
       const record = {
         ...baseRecord,
+        protection: backend.protection || "unknown",
+        status: backend.status || "unknown",
         verdict: scan.verdict,
         scannedPaths: scan.scannedPaths || [],
         findings: scan.findings || [],
@@ -1668,19 +2410,6 @@ const plugin = {
         return buildApprovalContextResult(normalizedSessionKey, [], []);
       }
 
-      if (!isApprovalResponseContext(latestUserIntentText, previousAssistantText)) {
-        logApprovalIntentSkip(normalizedSessionKey, source, "not_approval_response_context", {
-          latestUserPreview: truncateForSummary(latestUserIntentText, 120),
-          previousAssistantPreview: truncateForSummary(previousAssistantText, 120),
-          approvalCount: approvals.length,
-        });
-        return buildApprovalContextResult(
-          normalizedSessionKey,
-          listSessionApprovals(normalizedSessionKey, ["granted"]),
-          [],
-        );
-      }
-
       const latestUserHash = hashText(latestUserIntentText);
       const grantedApprovals = approvals.filter((approval) => approval.state === "granted");
       const approvalsAwaitingLatestIntent = approvals.filter(
@@ -1703,7 +2432,11 @@ const plugin = {
         );
       }
 
-      if (approvalsAwaitingLatestIntent.length === 1 && hasExplicitRefusalIntent(latestUserIntentText)) {
+      if (
+        approvalsAwaitingLatestIntent.length === 1 &&
+        hasExplicitRefusalIntent(latestUserIntentText) &&
+        !looksLikeFreshToolInstruction(latestUserIntentText)
+      ) {
         const targetApproval = approvalsAwaitingLatestIntent[0];
         targetApproval.lastIntentMessageHash = latestUserHash;
         await setApprovalState(
@@ -1725,6 +2458,27 @@ const plugin = {
           normalizedSessionKey,
           listSessionApprovals(normalizedSessionKey, ["granted"]),
           deniedApprovals,
+        );
+      }
+
+      const singlePendingExplicitApproval =
+        approvalsNeedingIntentReview.length === 1 &&
+        hasExplicitApprovalIntent(latestUserIntentText) &&
+        !looksLikeFreshToolInstruction(latestUserIntentText);
+
+      if (
+        !isApprovalResponseContext(latestUserIntentText, previousAssistantText) &&
+        !singlePendingExplicitApproval
+      ) {
+        logApprovalIntentSkip(normalizedSessionKey, source, "not_approval_response_context", {
+          latestUserPreview: truncateForSummary(latestUserIntentText, 120),
+          previousAssistantPreview: truncateForSummary(previousAssistantText, 120),
+          approvalCount: approvals.length,
+        });
+        return buildApprovalContextResult(
+          normalizedSessionKey,
+          listSessionApprovals(normalizedSessionKey, ["granted"]),
+          [],
         );
       }
 
@@ -2101,11 +2855,41 @@ const plugin = {
       );
       const fallbackLatestUser = extractLatestMessageText(event.messages, "user", 2000);
       const promptLatestUserText = normalizeApprovalIntentText(event.prompt) || event.prompt || "";
+      const messagePreviousAssistantText = extractPreviousAssistantText(
+        event.messages,
+        fallbackLatestUser?.index,
+        2000,
+      );
+      const preferredIntent = selectApprovalIntentCandidate([
+        {
+          source: "prompt",
+          text: promptLatestUserText,
+          previousAssistantText:
+            persistedMessages?.previousAssistantText || messagePreviousAssistantText || "",
+        },
+        {
+          source: "persisted",
+          text: persistedMessages?.latestUserText || "",
+          previousAssistantText:
+            persistedMessages?.previousAssistantText || messagePreviousAssistantText || "",
+        },
+        {
+          source: "messages",
+          text: fallbackLatestUser?.text || "",
+          previousAssistantText:
+            messagePreviousAssistantText || persistedMessages?.previousAssistantText || "",
+        },
+      ]);
       const latestUserText =
-        fallbackLatestUser?.text || promptLatestUserText || persistedMessages?.latestUserText || "";
+        preferredIntent?.text ||
+        fallbackLatestUser?.text ||
+        promptLatestUserText ||
+        persistedMessages?.latestUserText ||
+        "";
       const previousAssistantText =
-        extractPreviousAssistantText(event.messages, fallbackLatestUser?.index, 2000) ||
+        preferredIntent?.previousAssistantText ||
         persistedMessages?.previousAssistantText ||
+        messagePreviousAssistantText ||
         "";
       return await resolveApprovalIntentForSession({
         sessionKey,
@@ -2184,11 +2968,59 @@ const plugin = {
         params: event.params,
         evaluation,
       });
+      const scaAction = shouldRunScaForAction(antivirusAction) ? antivirusAction : undefined;
       const argsHash = buildArgsHash(event.params);
       let deniedApproval = findSessionApproval(sessionKey, event.toolName, argsHash, ["denied"]);
       let grantedApproval = findSessionApproval(sessionKey, event.toolName, argsHash, ["granted"]);
 
+      if (evaluation.capability === "shell_exec") {
+        const posture = await degradeExecPosture({
+          toolName: event.toolName,
+          sessionKey,
+          observedAt: Date.now(),
+          reasonCode: "exec_tool_observed",
+        });
+        if (posture?.posture === EXEC_POSTURE_DEGRADED) {
+          logSecurity(api, "exec_posture_degraded", {
+            sessionKey,
+            toolName: event.toolName,
+            reasonCode: posture.reasonCode,
+          });
+        }
+      }
+
+      const requiredBrokerBlockReason =
+        evaluation.finalAction === "block"
+          ? undefined
+          : await ensureRequiredScanBrokerAvailability(antivirusAction);
+      const requiredScaBlockReason =
+        evaluation.finalAction === "block" ? undefined : await ensureRequiredScaAvailability(scaAction);
+
       if (evaluation.finalAction === "allow") {
+        if (requiredBrokerBlockReason) {
+          rememberBlockedExecutionReply(sessionKey, requiredBrokerBlockReason);
+          logSecurity(api, "scan_broker_required_block", {
+            toolName: event.toolName,
+            toolCallId: event.toolCallId || null,
+            actionKind: antivirusAction?.kind || "unknown",
+          });
+          return {
+            block: true,
+            blockReason: requiredBrokerBlockReason,
+          };
+        }
+        if (requiredScaBlockReason) {
+          rememberBlockedExecutionReply(sessionKey, requiredScaBlockReason);
+          logSecurity(api, "sca_required_block", {
+            toolName: event.toolName,
+            toolCallId: event.toolCallId || null,
+            actionKind: scaAction?.kind || "unknown",
+          });
+          return {
+            block: true,
+            blockReason: requiredScaBlockReason,
+          };
+        }
         rememberAntivirusPlan(event.toolCallId, sessionKey, antivirusAction);
         logSecurity(api, "egress_allow", {
           toolName: event.toolName,
@@ -2213,6 +3045,32 @@ const plugin = {
         return {
           block: true,
           blockReason: evaluation.blockReason || buildApprovalRequiredBlockReason(event.toolName, evaluation, argsHash),
+        };
+      }
+
+      if (requiredBrokerBlockReason) {
+        rememberBlockedExecutionReply(sessionKey, requiredBrokerBlockReason);
+        logSecurity(api, "scan_broker_required_block", {
+          toolName: event.toolName,
+          toolCallId: event.toolCallId || null,
+          actionKind: antivirusAction?.kind || "unknown",
+        });
+        return {
+          block: true,
+          blockReason: requiredBrokerBlockReason,
+        };
+      }
+
+      if (requiredScaBlockReason) {
+        rememberBlockedExecutionReply(sessionKey, requiredScaBlockReason);
+        logSecurity(api, "sca_required_block", {
+          toolName: event.toolName,
+          toolCallId: event.toolCallId || null,
+          actionKind: scaAction?.kind || "unknown",
+        });
+        return {
+          block: true,
+          blockReason: requiredScaBlockReason,
         };
       }
 
@@ -2429,11 +3287,15 @@ const plugin = {
       const pendingAntivirusAction = getAntivirusPlan(toolCallId);
       const antivirusWarning =
         takeAntivirusToolWarning(toolCallId) ||
-        (pendingAntivirusAction
+        (pendingAntivirusAction && !scanBrokerEnabled(config.scanBroker)
           ? resolveImmediateAntivirusWarning(config.antivirus, pendingAntivirusAction.roots || [])
           : undefined);
+      const scaWarning = takeScaToolWarning(toolCallId);
       if (antivirusWarning) {
         rememberAntivirusReplyRequirement(sessionKey, [{ message: antivirusWarning }]);
+      }
+      if (scaWarning) {
+        rememberAntivirusReplyRequirement(sessionKey, [{ message: scaWarning }]);
       }
       if (trustDecision.trustClass === "trusted_local" && getSessionTaint(sessionKey) === "clean") {
         return;
@@ -2444,6 +3306,7 @@ const plugin = {
         toolCallId,
         toolName,
         antivirusWarning,
+        scaWarning,
         text,
         rawMessage: event.message,
         rawHash: hashText(text),
@@ -2478,6 +3341,7 @@ const plugin = {
             sessionTaint: getSessionTaint(ctx.sessionKey || ""),
           }),
         });
+      const scaAction = shouldRunScaForAction(antivirusAction) ? antivirusAction : undefined;
       const decision =
         (event.toolCallId && toolDecisions.get(event.toolCallId)) ||
         getSynchronousToolTrust({
@@ -2494,6 +3358,15 @@ const plugin = {
         } catch (error) {
           api.logger.warn(
             `[${LOG_PREFIX}] antivirus handling failed for ${event.toolName}: ${String(error)}`,
+          );
+        }
+      }
+      if (scaAction) {
+        try {
+          await handleScaResult({ event, ctx, action: scaAction });
+        } catch (error) {
+          api.logger.warn(
+            `[${LOG_PREFIX}] SCA handling failed for ${event.toolName}: ${String(error)}`,
           );
         }
       }
@@ -2573,6 +3446,28 @@ const plugin = {
             api.logger.warn(
               `[${LOG_PREFIX}] antivirus flush failed before prompt build for ${toolName}: ${String(error)}`,
             );
+          }
+          if (shouldRunScaForAction(pendingAntivirusAction)) {
+            try {
+              await handleScaResult(
+                {
+                  event: {
+                    toolCallId,
+                    toolName,
+                  },
+                  ctx: {
+                    ...ctx,
+                    toolCallId,
+                    toolName,
+                  },
+                  action: pendingAntivirusAction,
+                },
+              );
+            } catch (error) {
+              api.logger.warn(
+                `[${LOG_PREFIX}] SCA flush failed before prompt build for ${toolName}: ${String(error)}`,
+              );
+            }
           }
         }
 
@@ -2668,6 +3563,20 @@ const plugin = {
       if (isInternalReviewSessionKey(ctx.sessionKey) || getInternalReviewSession(ctx.sessionKey)) {
         return;
       }
+      const blockedReply = getBlockedExecutionReply(ctx.sessionKey);
+      if (blockedReply) {
+        const nextMessage = applyBlockedExecutionReply(event.message, blockedReply);
+        if (nextMessage !== event.message) {
+          clearBlockedExecutionReply(ctx.sessionKey);
+          clearAntivirusReplyRequirement(ctx.sessionKey);
+          return {
+            message: nextMessage,
+          };
+        }
+        if (isUserFacingAssistantMessage(event.message)) {
+          clearBlockedExecutionReply(ctx.sessionKey);
+        }
+      }
       const notices = getAntivirusReplyRequirement(ctx.sessionKey);
       if (notices.length === 0) {
         return;
@@ -2704,8 +3613,12 @@ const plugin = {
       );
     }
 
+    if (config.execPosture?.posture === EXEC_POSTURE_DEGRADED) {
+      api.logger.warn(`[${LOG_PREFIX}] ${config.execPosture.statusMessage}`);
+    }
+
     api.logger.info(
-      `[${LOG_PREFIX}] ready: ingressBackend=${config.ingressBackend} egressBackend=${config.egressBackend} trustBackend=${config.trustBackend} gatewayReviewTransport=${config.gatewayReviewTransport} gatewayBaseUrl=${config.gatewayBaseUrl}`,
+      `[${LOG_PREFIX}] ready: ingressBackend=${config.ingressBackend} egressBackend=${config.egressBackend} trustBackend=${config.trustBackend} gatewayReviewTransport=${config.gatewayReviewTransport} gatewayBaseUrl=${config.gatewayBaseUrl} scaMode=${config.sca.mode} execPosture=${config.execPosture?.posture || "unknown"}`,
     );
   },
 };

@@ -1,27 +1,31 @@
-# OCS Antivirus Smoke Test
+# OCS Antivirus And Package-Scan Smoke Test
 
-Last updated: 2026-03-22
+Last updated: 2026-03-25
 Canonical spec: [OPENCLAW-SCANNER-SPEC.md](./OPENCLAW-SCANNER-SPEC.md)
 
-This protocol verifies OCS antivirus behavior on a real pod host in two states:
+This protocol verifies the exec-capable canary path on a real pod host:
 
-- without a usable ClamAV daemon
-- with `clamd` installed and healthy
+- broker-backed ClamAV download scanning
+- broker-backed ClamAV package-install scanning
+- broker-backed OSV package SCA
+- optional broker-required fail-closed behavior
 
 It uses a coding-profile canary because messaging-profile pods do not expose `exec`.
 
 ## What this smoke proves
 
 - file-producing shell actions are detected by OCS
-- OCS records `unavailable` when no antivirus daemon is usable
+- `openclaw-sec` is the transport for scan-backed exec actions
 - OCS records `clean` with `protection=triggered` when `clamd` is reachable
-- the pod workspace is actually mutated by the `npm install` action in both runs
+- OCS records `advisory` for a known vulnerable npm dependency through OSV
+- broker-required mode can stop the real package-install side effect even if the assistant reply is misleading
 
 ## What this smoke does not prove
 
 - fanotify / `clamonacc` on-access enforcement
 - malware quarantine behavior
 - perfect user-visible inline warning delivery on every deployed OpenClaw build
+- malicious-package heuristics beyond ClamAV and OSV
 
 ## Canary Setup
 
@@ -31,96 +35,44 @@ Recommended canary state:
 
 - `OPENCLAW_STATE_DIR=/home/openclaw/.openclaw-avsmoke`
 - `OPENCLAW_CONFIG_PATH=/home/openclaw/.openclaw-avsmoke/openclaw.json`
+- `OPENCLAW_GATEWAY_PORT=19011`
 - `tools.profile = "coding"`
 - no channel plugins
 - OCS enabled from `/home/openclaw/.openclaw-avsmoke/extensions/openclaw-scanner`
 - loopback gateway on a separate port such as `19011`
 
-## No-ClamAV Smoke
+## Preferred Smoke Command
 
-1. Ensure there is no usable daemon:
-   - `command -v clamd` should fail or `/run/clamav/clamd.ctl` should be absent.
-2. Clear old canary evidence:
-   - remove the test workspace directory
-   - remove `antivirus-status.json`
-   - remove `antivirus-ledger.json`
-3. Run a real file-producing command through the agent:
+From the ops repo on the controller host:
 
 ```bash
-env OPENCLAW_STATE_DIR=/home/openclaw/.openclaw-avsmoke \
-    OPENCLAW_CONFIG_PATH=/home/openclaw/.openclaw-avsmoke/openclaw.json \
-    node /home/openclaw/code/openclaw/dist/index.js gateway call agent --expect-final --json --params '{
-      "sessionKey":"agent:main:avsmoke-no-clam",
-      "idempotencyKey":"avsmoke-no-clam-1",
-      "message":"Use the exec tool to run this exact command in the workspace and then summarize the result: mkdir -p /home/openclaw/.openclaw-avsmoke/workspace/av-no-clam && cd /home/openclaw/.openclaw-avsmoke/workspace/av-no-clam && printf '\''{\"name\":\"av-no-clam\",\"version\":\"1.0.0\"}\n'\'' > package.json && npm install is-number@7.0.0"
-    }'
+SMOKE_INCLUDE_BROKER_FAILCLOSED=1 ./smoke/smoke_remote_scanner.sh 51.210.13.102 qa-062
 ```
 
 Expected evidence:
 
-- workspace contains `av-no-clam/package.json`, `package-lock.json`, and `node_modules/is-number`
-- `~/.openclaw-avsmoke/plugins/openclaw-scanner/antivirus-status.json` reports:
-  - `status: "unavailable"`
-  - `protection: "unavailable"`
-- `~/.openclaw-avsmoke/plugins/openclaw-scanner/antivirus-ledger.json` contains a record with:
-  - `verdict: "unavailable"`
-  - `actionKind: "package install"`
-- gateway log contains `event":"antivirus_unavailable"`
-
-## With-ClamAV Smoke
-
-1. Install packages on the pod host:
-
-```bash
-sudo apt-get update
-sudo DEBIAN_FRONTEND=noninteractive apt-get install -y clamav clamav-daemon
-```
-
-2. Wait for databases, then start the daemon:
-
-```bash
-sudo systemctl status clamav-freshclam --no-pager
-sudo systemctl restart clamav-daemon
-sudo systemctl status clamav-daemon --no-pager
-ls -la /run/clamav
-```
-
-Expected daemon evidence:
-
-- `/var/lib/clamav/main.cvd` exists
-- `/var/lib/clamav/daily.cvd` exists
-- `clamav-daemon.service` is `active (running)`
-- `/run/clamav/clamd.ctl` exists
-
-3. Clear old canary evidence:
-   - remove the test workspace directory
-   - remove `antivirus-status.json`
-   - remove `antivirus-ledger.json`
-4. Run another real file-producing command through the agent:
-
-```bash
-env OPENCLAW_STATE_DIR=/home/openclaw/.openclaw-avsmoke \
-    OPENCLAW_CONFIG_PATH=/home/openclaw/.openclaw-avsmoke/openclaw.json \
-    node /home/openclaw/code/openclaw/dist/index.js gateway call agent --expect-final --json --params '{
-      "sessionKey":"agent:main:avsmoke-with-clam",
-      "idempotencyKey":"avsmoke-with-clam-1",
-      "message":"Use the exec tool to run this exact command in the workspace and then summarize the result: mkdir -p /home/openclaw/.openclaw-avsmoke/workspace/av-with-clam && cd /home/openclaw/.openclaw-avsmoke/workspace/av-with-clam && printf '\''{\"name\":\"av-with-clam\",\"version\":\"1.0.0\"}\n'\'' > package.json && npm install is-odd@3.0.1"
-    }'
-```
-
-Expected evidence:
-
-- workspace contains `av-with-clam/package.json`, `package-lock.json`, and `node_modules/is-odd`
+- `posture-report` shows `degraded_exec_posture`
+- the download session writes `broker-download/example.html`
 - `~/.openclaw-avsmoke/plugins/openclaw-scanner/antivirus-status.json` reports:
   - `status: "active"`
   - `protection: "triggered"`
-  - `socketPath: "/run/clamav/clamd.ctl"`
-- `~/.openclaw-avsmoke/plugins/openclaw-scanner/antivirus-ledger.json` contains a record with:
+  - `transport: "openclaw-sec"`
+- `~/.openclaw-avsmoke/plugins/openclaw-scanner/antivirus-ledger.json` contains a download record with:
   - `verdict: "clean"`
   - `protection: "triggered"`
-  - `scannedPaths` populated
-- gateway log contains `event":"antivirus_scan_clean"`
-- there should be no new `antivirus_unavailable` event for the with-ClamAV run
+  - `transport: "openclaw-sec"`
+- the package-install session writes `broker-npm/package-lock.json`
+- `~/.openclaw-avsmoke/plugins/openclaw-scanner/antivirus-ledger.json` contains a package-install record with:
+  - `verdict: "clean"`
+  - `transport: "openclaw-sec"`
+- `~/.openclaw-avsmoke/plugins/openclaw-scanner/sca-ledger.json` contains a package-install record with:
+  - `verdict: "advisory"`
+  - `transport: "openclaw-sec"`
+  - advisory ids `GHSA-vh95-rmgr-6w4m` and `GHSA-xvch-5gv4-984h`
+- `/var/log/openclaw-sec/scans.jsonl` contains one `malware_scan` record and one `package_sca` record for the package-install session
+- with `SMOKE_INCLUDE_BROKER_FAILCLOSED=1`, the negative phase passes only if:
+  - the workspace check prints `MISSING`
+  - the broker log does not get a new record for the blocked action
 
 ## Reporting Commands
 
@@ -133,18 +85,31 @@ node scripts/print_antivirus_report.mjs --state-dir ~/.openclaw/plugins/openclaw
 Live canary report on the pod host:
 
 ```bash
-cat /home/openclaw/.openclaw-avsmoke/plugins/openclaw-scanner/antivirus-status.json
-cat /home/openclaw/.openclaw-avsmoke/plugins/openclaw-scanner/antivirus-ledger.json
+env OPENCLAW_STATE_DIR=/home/openclaw/.openclaw-avsmoke \
+    OPENCLAW_CONFIG_PATH=/home/openclaw/.openclaw-avsmoke/openclaw.json \
+    OPENCLAW_GATEWAY_PORT=19011 \
+    node /home/openclaw/code/openclaw/dist/index.js ocs antivirus-report --json --limit 20
+
+env OPENCLAW_STATE_DIR=/home/openclaw/.openclaw-avsmoke \
+    OPENCLAW_CONFIG_PATH=/home/openclaw/.openclaw-avsmoke/openclaw.json \
+    OPENCLAW_GATEWAY_PORT=19011 \
+    node /home/openclaw/code/openclaw/dist/index.js ocs sca-report --json --limit 20
+
+env OPENCLAW_STATE_DIR=/home/openclaw/.openclaw-avsmoke \
+    OPENCLAW_CONFIG_PATH=/home/openclaw/.openclaw-avsmoke/openclaw.json \
+    OPENCLAW_GATEWAY_PORT=19011 \
+    node /home/openclaw/code/openclaw/dist/index.js ocs posture-report --json
 ```
 
 ## Verified Live Notes
 
-Verified on `51.210.13.102` on March 22, 2026 UTC:
+Verified on `51.210.13.102` on March 25, 2026 UTC:
 
-- the live messaging gateway was not suitable for AV smoke because it only exposed messaging/session tools
 - the smoke used an isolated coding-profile canary gateway under `~/.openclaw-avsmoke`
-- no-ClamAV run recorded `unavailable` and still completed the `npm install`
-- with-ClamAV run recorded `clean` with `protection=triggered`
+- canary CLI needed `OPENCLAW_GATEWAY_PORT=19011`; without it, the CLI drifted back to the main `18789` gateway
+- broker-backed download recorded antivirus `clean`
+- broker-backed `npm install minimist@0.0.8 --ignore-scripts` recorded antivirus `clean` and SCA `advisory`
+- broker-required negative check left the workspace path absent even though the assistant reply still guessed the package name
 
 Verified on Vince pod `51.210.14.27` on March 22, 2026 UTC with OpenClaw `2026.3.14`:
 

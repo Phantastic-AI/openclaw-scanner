@@ -1,6 +1,6 @@
 # OpenClaw Scanner (OCS) Spec
 
-Last updated: 2026-03-17
+Last updated: 2026-03-25
 
 Canonical markdown: [OPENCLAW-SCANNER-SPEC.md](./OPENCLAW-SCANNER-SPEC.md)
 
@@ -12,6 +12,7 @@ It does that with two flows:
 
 - `Ingress Guard`: `stub -> review -> allow | warn | quarantine`
 - `Egress Guard`: `check -> allow | ask | block`
+- `Package Scan`: `detect install -> ClamAV file scan + OSV source scan -> clean | advisory | inconclusive | unavailable`
 
 Default deployment is gateway-backed. The plugin uses OpenClaw's existing model stack through the gateway. PromptScanner is optional and fits behind a generic HTTP review adapter.
 
@@ -38,6 +39,7 @@ These constraints came out of earlier design review and are not optional:
 - review traffic and approval-control traffic must bypass the guard safely
 - `ask` is a real approval state machine, not a vague intention
 - cached review results must not replay across stronger taint contexts
+- same-UID self-tamper resistance is not claimed when exec-capable tools are exposed
 
 ## Core Records
 
@@ -141,6 +143,21 @@ Rules:
 - approval is single-use
 - approval is consumed on successful execution
 - replay, expiry, or argument mutation invalidates the approval
+
+## Exec Posture
+
+OCS tracks one explicit posture downgrade:
+
+- `normal`
+- `degraded_exec_posture`
+
+Rules:
+
+- if exec-capable tools are configured, posture is `degraded_exec_posture`
+- if exec is later observed at runtime, posture stays `degraded_exec_posture`
+- degraded posture does not disable ingress or egress enforcement
+- degraded posture means OCS no longer claims same-UID self-tamper resistance
+- sandboxed exec may only clear this posture with trusted runtime attestation; plugin-side heuristics are not sufficient proof
 
 ## Backend Model
 
@@ -310,6 +327,7 @@ Headless default:
 ### Deterministic Defaults
 
 - `secret_read` => `block`
+- OCS control-plane reads, writes, deletes, and shell access => `block`
 - obvious exfiltration => `block`
 - `curl | bash` style payloads => `block`
 - `network_outbound` that sends agent-composed or artifact-derived data to a remote system => `ask`
@@ -321,6 +339,217 @@ Headless default:
 Rules beat model review. A model must not override deterministic hard blocks.
 
 Read-only fetch-style network tools are treated as ingress candidates, not side-effecting `network_outbound` egress actions.
+
+Protected control-plane paths include at least:
+
+- `~/.openclaw/openclaw.json`
+- `~/.openclaw/plugins/openclaw-scanner/**`
+
+`ask` remains an approval UX/state machine. It is not a same-UID security boundary once arbitrary local execution is available.
+
+## Package Scanning
+
+Package-producing actions are scanned in two layers:
+
+1. ClamAV for file-level malware coverage
+2. OSV source scanning for known vulnerable dependencies
+
+Scope:
+
+- JavaScript package installs such as `npm`, `pnpm`, `yarn`, and `bun`
+- Python package installs such as `pip` and `uv pip`
+
+OSV behavior:
+
+- source scan runs against the install root after the action
+- verdicts are `clean | advisory | inconclusive | unavailable`
+- `required` mode may block package-install actions when `osv-scanner` is unavailable
+- `inconclusive` means no supported lockfiles or manifests were detected; it is not the same as clean
+
+Limits:
+
+- OSV source scanning depends on supported lockfiles and manifests
+- it catches known vulnerable dependency versions, not a fresh malicious package with no advisory yet
+- it complements ClamAV; it does not replace future package-policy heuristics
+
+## Hardening Sequence
+
+The hardening order is deliberate.
+
+### Stage 0: Current OCS
+
+Today OCS owns:
+
+- ingress review
+- egress policy and approval UX
+- control-plane path protection for its own local state
+- ClamAV integration
+- OSV source scanning
+
+Today OCS does not claim:
+
+- same-UID approval tamper resistance once exec-capable tools are exposed
+- scanner isolation when scanners are invoked directly by the plugin process
+
+### Stage 1: `openclaw-sec` Scan Broker
+
+Stage 1 is the optional separate-UID scan broker described in:
+
+- [OPENCLAW-SEC-BROKER-SPEC.md](./OPENCLAW-SEC-BROKER-SPEC.md)
+- [OPENCLAW-SEC-BROKER-PLAN.md](./OPENCLAW-SEC-BROKER-PLAN.md)
+
+What this stage adds:
+
+- one separate-UID socket boundary for scan requests
+- broker-owned scan logs
+- `clamd` requests issued outside the `openclaw` UID
+- bubblewrapped `osv-scanner` execution outside the `openclaw` UID
+- one extension surface for future scanner backends
+
+What this stage does not solve:
+
+- approval integrity
+- approval-log ownership
+- same-UID tamper resistance for approval state
+
+### Stage 2: Separate-UID Approval Control Plane
+
+After the broker is deployed, the next meaningful hardening step is not "more UID checks."
+
+It is:
+
+- move approval ownership out of `openclaw`
+- move approval logging out of `openclaw`
+- require OCS to consume approval decisions from a separate-UID control plane
+
+That is the point where approval integrity starts to become meaningful under exec-capable profiles.
+
+## RFC: Artifact Taint Storage And Script Recheck
+
+This section is future design guidance. It is not part of the current `0.6.x` enforcement contract.
+
+### Problem
+
+Current OCS tracks session taint well enough for ingress review, but it does not yet persist artifact-level provenance strongly enough to answer all of these questions:
+
+- was this exact file ever scanned
+- which scanner scanned it
+- were the current bytes scanned or only an earlier version
+- was this script written from tool output, downloaded, extracted, or installed
+- is a later `bash script.sh` execution re-running content that has changed since the last scan
+
+### Proposed Split
+
+Use two taint stores, not one:
+
+- session taint: in-memory, plugin-owned, ephemeral
+- artifact taint: persisted, content-addressed, and eventually broker-owned
+
+Session taint remains cheap conversational state such as `clean | warned | quarantined`.
+Artifact taint becomes per-file or per-package state keyed by the actual bytes being executed or re-read.
+
+### Proposed Artifact Ledger
+
+Authoritative future home:
+
+- broker-owned SQLite or JSONL store under `openclaw-sec`
+- optional filesystem cache via xattrs
+
+Proposed record shape:
+
+```json
+{
+  "artifactId": "art-123",
+  "canonicalPath": "/workspace/scripts/deploy.sh",
+  "contentHash": "sha256:abc",
+  "kind": "script",
+  "source": "written",
+  "derivedFrom": ["artifact-122"],
+  "backends": {
+    "ingressReview": "warn",
+    "malwareScan": "clean",
+    "packageSca": "not_applicable"
+  },
+  "state": "warn",
+  "scannedAt": "2026-03-26T00:00:00Z"
+}
+```
+
+Minimum fields:
+
+- `canonicalPath`
+- `contentHash`
+- `kind`: `script | binary | archive | package_tree | text | unknown`
+- `source`: `written | downloaded | extracted | installed | generated | unknown`
+- `derivedFrom`
+- per-backend state
+- overall state
+
+Per-backend states should be explicit, not boolean:
+
+- `not_applicable`
+- `pending`
+- `clean`
+- `warn`
+- `blocked`
+- `unavailable`
+- `error`
+- `stale`
+
+### Filesystem And LSM Primitives
+
+Linux primitives help, but they are not the source of truth by themselves.
+
+Useful primitives:
+
+- xattrs for cached per-file status such as `user.ocs.hash` or `user.ocs.taint`
+- fanotify or inotify to invalidate stale scan results on write, rename, or exec
+- IMA, EVM, or fs-verity for stronger integrity measurement
+- LSM labels for future enforcement like "tainted content may not exec"
+
+Those primitives complement the ledger. They do not replace provenance, multi-backend history, or user-space reporting.
+
+### Script Write And Exec Correlation
+
+Planned future model:
+
+1. On `write_local`, inspect visible script-like content when available.
+2. Record an observation keyed by canonical path plus content hash.
+3. On `shell_exec`, detect launcher forms such as:
+   - `bash foo.sh`
+   - `sh foo.sh`
+   - `python foo.py`
+   - `node app.mjs`
+   - `./tool`
+4. Re-read the final file contents at execution time.
+5. Re-hash and classify the actual bytes that will run.
+6. Decide `allow | ask | block` from the final content, not just the command line.
+
+Write-time inspection is early warning. Exec-time inspection is the real enforcement point.
+
+### Exec-Time Recheck Decision Rules
+
+Future intent:
+
+- obvious secret theft, protected-path reads plus network egress, staged loaders, or hidden interpreter payloads => `block`
+- ordinary offsite send of non-secret data => `ask`
+- clearly local benign automation => `allow` or `review`
+
+`quarantine` is ingress-only. Exec-time script decisions stay in the egress vocabulary: `allow | ask | block | review`.
+
+### Cost And Context Limits
+
+If a future exec-time script recheck cannot inspect enough of the file safely, it must not silently bless execution.
+
+Future fallback order:
+
+1. apply deterministic normalization and hard-block rules first
+2. inspect the final script body directly when size is within policy limits
+3. if the script is too large, chunk and classify with explicit truncation markers
+4. if the review remains incomplete but the action has network, interpreter, or side-effect risk, degrade to at least `ask`
+5. if required review cannot run at all for a high-risk launcher, `block`
+
+The plugin must never convert "unscanned because too large or too expensive" into "clean".
 
 ## HTTP Review Adapter
 
@@ -452,4 +681,4 @@ This is the product in one paragraph:
 - If tool output is not clearly clean local content, store a stub, review it, and only then decide whether to pass it through, wrap it, or quarantine it.
 - If a tool action has meaningful side effects, check it before execution and either allow it, ask for approval, or block it.
 - Anything created from dirty content stays dirty until explicitly cleared.
-- The plugin uses OpenClaw's existing model stack by default, and PromptScanner is just an optional backend.
+- The plugin uses OpenClaw's existing model stack by default, PromptScanner is just an optional backend, and package installs get both file-malware and known-vulnerability scanning.

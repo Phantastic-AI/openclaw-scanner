@@ -1,6 +1,6 @@
 # OpenClaw Scanner (OCS) Test Plan
 
-Last updated: 2026-03-17
+Last updated: 2026-03-25
 
 Canonical markdown for the public scanner repo: [OPENCLAW-SCANNER-TEST-PLAN.md](./OPENCLAW-SCANNER-TEST-PLAN.md)
 
@@ -18,6 +18,10 @@ The point of this plan is not to test every idea. It is to prove the small core 
 4. `ask` is single-use and exact-match
 5. review/bypass traffic cannot be spoofed
 6. cache hits do not weaken taint-sensitive decisions
+7. exec-capable posture downgrades are surfaced honestly
+8. package-install scanning records clean, advisory, and unavailable states correctly
+9. broker-required mode fails closed for covered scan actions when the broker is unavailable
+10. broker-backed scans populate the same ledgers and reports as direct local scans
 
 ## Test Layers
 
@@ -52,6 +56,38 @@ Test with:
 - restartable pending store
 - simulated multi-turn session
 
+### Live Pod QA Gate
+
+Before shipping a pod-facing build, rerun the live smoke matrix on a real host:
+
+1. main messaging gateway:
+   - `allow`
+   - `ask`
+   - natural-language `approve`
+   - natural-language `deny`
+2. exec-capable canary:
+   - `posture-report`
+   - broker-backed download
+   - broker-backed package install
+   - broker-backed SCA advisory
+   - optional broker-required fail-closed check
+
+Source of truth for each phase:
+
+- messaging approve:
+  - transcript shows second approved tool call accepted
+  - security log shows `approval_granted`
+  - security log shows `egress_allow_approved`
+- messaging deny:
+  - approval store shows `state: "denied"`
+- broker-backed download/package install:
+  - antivirus report shows `transport: "openclaw-sec"`
+- broker-backed SCA:
+  - SCA report shows `transport: "openclaw-sec"` and expected advisory ids
+- broker-required fail-closed:
+  - workspace path stays absent
+  - do not trust the assistant reply alone
+
 ## Required Tests
 
 ### Happy Path
@@ -78,6 +114,7 @@ Test with:
 4. `before_prompt_build` with no pending stubs is a no-op
 5. quarantine never emits model-generated summaries
 6. two concurrent pending stubs cannot cross-wire raw content during resolution
+7. legacy malicious skill fixtures still quarantine under the current hook path
 
 ### Taint Propagation
 
@@ -112,6 +149,33 @@ Test with:
 8. `destructive` becomes `ask`
 9. `git_mutation` becomes `ask`
 10. deterministic hard block beats model `allow`
+11. OCS control-plane reads are blocked
+12. OCS control-plane writes are blocked
+13. OCS control-plane deletes are blocked
+14. shell access to OCS control-plane paths is blocked
+
+### Exec Posture
+
+1. coding or full-profile tool policy marks posture as degraded
+2. messaging-only tool policy keeps posture normal until exec is observed
+3. observing exec at runtime persists degraded posture status
+4. posture report exposes configured and observed exec state
+
+### Package Scanning
+
+1. required SCA mode blocks package-install actions when `osv-scanner` is unavailable
+2. package installs with OSV advisories record `advisory`
+3. package installs with no supported manifests record `inconclusive`
+4. package installs with clean OSV output record `clean`
+5. SCA report renders status and recent advisory records
+
+### Scan Broker
+
+1. required broker mode blocks scan-covered actions when the broker socket is unavailable
+2. broker-backed malware scans populate antivirus ledger and report entries
+3. broker-backed package SCA populates SCA ledger and report entries
+4. broker `auto` mode falls back to local scanning with a degraded warning
+5. live fail-closed smoke judges execution by workspace mutation and ledgers, not only by final assistant text
 
 ### Ask Mechanics
 
