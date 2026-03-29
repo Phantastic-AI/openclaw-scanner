@@ -45,7 +45,7 @@ That gives you the plugin and both helper binaries. It does not create system se
 
 **Add the action review service** — recommended for exec-capable or other high-impact profiles. Run `openclaw-action-reviewd` as a separate service under its own UID. See [Action Review Service](#action-review-service-openclaw-action-reviewd) for enablement.
 
-If you enable `openclaw-action-reviewd` for exec-capable profiles, disable OpenClaw core `approvals.exec` forwarding on that same profile so there is only one approval authority.
+If you enable `openclaw-action-reviewd` for exec-capable profiles while OpenClaw core `approvals.exec` forwarding is also enabled, OCS now fails startup with a config error. There must be exactly one approval authority.
 
 Email [team@moltpod.com](mailto:team@moltpod.com) if you need help getting this set up.
 
@@ -147,7 +147,7 @@ If you do not set `trustModel`, `ingressModel`, `egressModel`, or `approvalInten
 - so plugin-grade `ask` still appears as a block on the first attempt
 - the interactive approval loop now happens on the next turn: the plugin reviews the user's latest reply with `approvalIntentModel` and allows the exact pending action once if the user clearly approved it
 - if you enable `openclaw-action-reviewd`, `ask` moves out of the chat turn and into a separate approval service; the user reply in the main session is no longer the approval authority
-- if you enable `openclaw-action-reviewd` for exec-capable profiles, disable OpenClaw core `approvals.exec` forwarding on that same profile; otherwise the agent can receive conflicting approval instructions
+- if you enable `openclaw-action-reviewd` for exec-capable profiles while OpenClaw core `approvals.exec` forwarding is also enabled, OCS now fails startup with a config error; there must be exactly one approval authority
 - if exec-capable tools are exposed, OCS reports `degraded_exec_posture`; ingress and egress still work, but same-UID self-tamper resistance is no longer a credible claim
 - live messaging-pod smoke is documented in [docs/SMOKE-TEST.md](./docs/SMOKE-TEST.md)
 - exec-capable canary smoke for scan-daemon-backed download and package-install coverage is documented in [docs/ANTIVIRUS-SMOKE-TEST.md](./docs/ANTIVIRUS-SMOKE-TEST.md)
@@ -500,7 +500,7 @@ When enabled, `openclaw-action-reviewd` owns:
 - denial records
 - reviewer-channel polling and intent classification
 
-For exec-capable profiles, `openclaw-action-reviewd` must be the only approval authority. Disable OpenClaw core `approvals.exec` forwarding on the same profile before you turn it on, or the model can surface conflicting approval instructions from two different systems.
+For exec-capable profiles, `openclaw-action-reviewd` must be the only approval authority. If OpenClaw core `approvals.exec` forwarding is also enabled on the same profile, OCS now fails startup with a config error.
 
 ### Config keys
 

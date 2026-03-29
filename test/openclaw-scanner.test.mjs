@@ -328,6 +328,48 @@ test("plugin warns at startup when exec-capable tools are configured", () => {
   assert.ok(logs.some(([level, message]) => level === "warn" && /same-uid self-tamper resistance/i.test(message)));
 });
 
+test("plugin rejects action-reviewd plus core exec approvals on exec-capable profiles", () => {
+  assert.throws(
+    () =>
+      registerPlugin(
+        {
+          actionReviewMode: "required",
+        },
+        {
+          tools: {
+            profile: "coding",
+          },
+          approvals: {
+            exec: {
+              enabled: true,
+            },
+          },
+        },
+      ),
+    /cannot run alongside OpenClaw core approvals\.exec forwarding/i,
+  );
+});
+
+test("plugin allows action-reviewd when exec-capable tools are not configured", () => {
+  const { logs } = registerPlugin(
+    {
+      actionReviewMode: "required",
+    },
+    {
+      tools: {
+        profile: "messaging",
+      },
+      approvals: {
+        exec: {
+          enabled: true,
+        },
+      },
+    },
+  );
+
+  assert.ok(logs.some(([level, message]) => level === "info" && /ready:/.test(message)));
+});
+
 test("before_tool_call persists degraded exec posture when exec is observed", async () => {
   const { hooks, stateDir } = registerPlugin(
     {

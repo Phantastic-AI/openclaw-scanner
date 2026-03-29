@@ -226,7 +226,20 @@ function normalizeConfig(rawConfig, fullConfig) {
     scanBroker: normalizeScanDaemonConfig(raw),
     actionReview: normalizeActionReviewdConfig(raw),
     execPosture: evaluateExecPosture(fullConfig),
+    coreExecApprovalsEnabled: fullConfig?.approvals?.exec?.enabled === true,
   };
+}
+
+function validateApprovalAuthorityConfig(config) {
+  if (
+    actionReviewdEnabled(config?.actionReview) &&
+    config?.execPosture?.configuredExecCapable === true &&
+    config?.coreExecApprovalsEnabled === true
+  ) {
+    throw new Error(
+      "OpenClaw Scanner config error: openclaw-action-reviewd cannot run alongside OpenClaw core approvals.exec forwarding on exec-capable profiles. Disable approvals.exec or disable actionReviewMode.",
+    );
+  }
 }
 
 function buildToolHintSets(config) {
@@ -1124,6 +1137,7 @@ const plugin = {
   description: "OpenClaw Scanner plugin for ingress review and egress blocking",
   register(api) {
     const config = normalizeConfig(api.pluginConfig, api.config);
+    validateApprovalAuthorityConfig(config);
     const stateDir = resolveReviewLedgerStateDir(api.runtime.state.resolveStateDir());
     if (typeof api.registerCli === "function") {
       api.registerCli(
